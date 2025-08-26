@@ -294,6 +294,19 @@ def refresh():
     return ("OK", 200)
 
 
+# Str_flask.py
+@app.before_first_request
+def warmup():
+    import matplotlib
+    import matplotlib.pyplot as plt
+    # 캐시 디렉토리 준비(없으면 생성)
+    matplotlib.get_cachedir()
+    # 초미니 플롯으로 백엔드/폰트 캐시 워밍업
+    fig, ax = plt.subplots()
+    ax.plot([0,1],[0,1])
+    plt.close(fig)
+
+
 if __name__ == "__main__":
     ensure_dirs()
     import os
