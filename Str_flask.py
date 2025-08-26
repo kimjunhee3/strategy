@@ -125,6 +125,13 @@ def draw_radar_chart_if_needed(df_score, team, category, compare_label, data_ts)
 # ---- Flask ----
 app = Flask(__name__, template_folder="templates", static_folder="static")
 
+# 🔥 Flask 3.x에서는 before_first_request가 없으므로 직접 한 번만 호출
+try:
+    warmup()
+except Exception as e:
+    import logging
+    logging.exception("Warmup failed: %s", e)
+
 
 @app.route("/", methods=["GET", "POST"])
 def index():
@@ -336,7 +343,7 @@ def warmup():
     matplotlib.get_cachedir()
     # 초미니 플롯으로 백엔드/폰트 캐시 워밍업
     fig, ax = plt.subplots()
-    ax.plot([0,1],[0,1])
+    ax.plot([0, 1], [0, 1])
     plt.close(fig)
 
 
