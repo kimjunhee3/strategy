@@ -166,8 +166,10 @@ def index():
                 top3 = df_sorted.head(3)
                 avg_row = top3.iloc[:, 1:].mean(numeric_only=True); avg_row["팀"] = "상위 3팀 평균"
             chart_path = draw_radar_chart_if_needed(
-    df, team, cat, compare_label=avg_row["팀"], data_ts=DATA_CACHE["ts"]
-)
+                df, team, cat,
+                compare_label=avg_row["팀"],
+                data_ts=DATA_CACHE["ts"]
+            )
             charts[cat] = chart_path
 
 
@@ -319,7 +321,9 @@ def index():
 
 @app.route("/refresh")
 def refresh():
-    _ = get_all_scores(force=True)
+    payload = get_all_scores(force=True)
+    DATA_CACHE["payload"] = payload
+    DATA_CACHE["ts"] = time.time()
     return ("OK", 200)
 
 
