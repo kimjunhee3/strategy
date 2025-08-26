@@ -43,34 +43,45 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-def draw_radar_chart(df_score: pd.DataFrame, team_name: str, category_name: str,
-                     compare_team_name="상위 3팀 평균") -> str:
-    labels = df_score.columns[1:]
+def draw_radar_chart(
+    df_score: pd.DataFrame,
+    team_name: str,
+    category_name: str,
+    compare_team_name: str = "상위 3팀 평균",
+) -> str:
+    # 1) 축 라벨 준비
+    labels = df_score.columns[1:]  # 첫 컬럼은 '팀'
     angles = np.linspace(0, 2*np.pi, len(labels), endpoint=False).tolist()
 
+    # 2) 비교용 데이터 (해당 팀 vs 상위3 평균)
     team_row = df_score[df_score["팀"] == team_name].iloc[0]
     score_col = df_score.columns[1]
     df_sorted = df_score.sort_values(by=score_col, ascending=False).reset_index(drop=True)
+
     top3 = df_sorted.head(3)
     avg_row = top3[labels].mean()
     avg_row["팀"] = compare_team_name
 
     compare_df = pd.concat([team_row.to_frame().T, avg_row.to_frame().T], ignore_index=True)
 
-    # 크기/해상도 키워서 선명하게
-    fig, ax = plt.subplots(figsize=(9.5, 9.5), subplot_kw=dict(polar=True))
+    # 3) 차트 기본 설정
+    # - 글자 크게 보이게 figsize를 조금 키움
+    fig, ax = plt.subplots(figsize=(10.5, 10.5), subplot_kw=dict(polar=True))
     ax.set_ylim(0, 1.0)
     plot_angles = angles + angles[:1]
+    ax.set_xticks(angles)
 
-    # 스타일
+    # 4) 스타일 (색/투명도)
     team_line_color = "#007bff"
     avg_line_color  = "#dc3545"
     team_fill_rgba = (0/255, 123/255, 255/255, 0.25)
     avg_fill_rgba  = (220/255, 53/255, 69/255, 0.12)
 
+    # 5) 두 개의 폴리곤을 그림
     for idx, row in compare_df.iterrows():
         values = row[labels].values.tolist()
         values += values[:1]
+
         if idx == 0:
             line_color = team_line_color
             fill_rgba  = team_fill_rgba
@@ -79,44 +90,51 @@ def draw_radar_chart(df_score: pd.DataFrame, team_name: str, category_name: str,
             line_color = avg_line_color
             fill_rgba  = avg_fill_rgba
             lw, marker, ls = 2, 's', '--'
+
         ax.plot(plot_angles, values, linewidth=lw, marker=marker, linestyle=ls,
                 color=line_color, zorder=3)
         ax.fill(plot_angles, values, color=fill_rgba, zorder=2)
 
-    # 축/레이블/범례 —> KFONT 있을 때만 한 번에 세팅
-    ax.set_xticks(angles)
-
+    # 6) 라벨/제목/범례: NanumGothic 있으면 그걸로, 없으면 기본 폰트
     if KFONT is not None:
-        ax.set_xticklabels(labels, fontproperties=KFONT, fontsize=14)
-        ax.set_title(f"{team_name}", fontproperties=KFONT, fontsize=20, pad=28, fontweight='bold')
-        leg = ax.legend(["해당팀", compare_team_name], loc='upper right',
-                        bbox_to_anchor=(1.20, 1.02), prop=KFONT, fontsize=12)
-        # r(반지름) 눈금도 폰트 적용
+        # 축(각도) 라벨
+        ax.set_xticklabels(labels, fontproperties=KFONT, fontsize=16)
+        # 반지름 눈금(0.2, 0.4, ...)도 폰트 지정
         for t in ax.get_yticklabels():
             t.set_fontproperties(KFONT)
             t.set_fontsize(12)
+        # 제목/범례
+        ax.set_title(f"{team_name}", fontproperties=KFONT, fontsize=22,
+                     pad=30, fontweight='bold')
+        ax.legend(["해당팀", compare_team_name],
+                  loc='upper right', bbox_to_anchor=(1.20, 1.02),
+                  prop=KFONT, fontsize=14)
     else:
-        ax.set_xticklabels(labels, fontsize=14)
-        ax.set_title(f"{team_name}", fontsize=20, pad=28, fontweight='bold')
-        leg = ax.legend(["해당팀", compare_team_name], loc='upper right',
-                        bbox_to_anchor=(1.20, 1.02), fontsize=12)
+        ax.set_xticklabels(labels, fontsize=16)
         ax.tick_params(labelsize=12)
+        ax.set_title(f"{team_name}", fontsize=22, pad=30, fontweight='bold')
+        ax.legend(["해당팀", compare_team_name],
+                  loc='upper right', bbox_to_anchor=(1.20, 1.02),
+                  fontsize=14)
 
+    # 7) 격자/배경
     ax.grid(True, alpha=0.6, linestyle='--', linewidth=1)
     ax.set_facecolor('white')
 
-    # 저장 경로 + 캐시 버전
+    # 8) 저장 (파일명에 버전 suffix -> 캐시 무효화 용이)
     output_dir = os.path.join("static", "output")
     os.makedirs(output_dir, exist_ok=True)
-    CHART_VER = "v2"  # 필요 시 v3, v4로 변경하면 캐시 무효화
+
+    CHART_VER = "v2"
     file_name = f"{team_name}_{category_name}_radar_{CHART_VER}.png"
     save_path = os.path.join(output_dir, file_name)
 
     plt.tight_layout()
-    plt.savefig(save_path, bbox_inches='tight', dpi=240, facecolor='white', edgecolor='none')
+    plt.savefig(save_path, bbox_inches='tight', dpi=220, facecolor='white', edgecolor='none')
     plt.close()
-    return f"output/{file_name}"
 
+    # 템플릿에서는 /static/ 접두어가 자동으로 붙으니 상대 경로만 반환
+    return f"output/{file_name}"
 def draw_radar_chart_if_needed(df_score, team, category, compare_label, data_ts):
     output_dir = os.path.join("static", "output")
     os.makedirs(output_dir, exist_ok=True)
