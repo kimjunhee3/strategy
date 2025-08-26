@@ -135,14 +135,20 @@ def draw_radar_chart(
 
     # 템플릿에서는 /static/ 접두어가 자동으로 붙으니 상대 경로만 반환
     return f"output/{file_name}"
+
 def draw_radar_chart_if_needed(df_score, team, category, compare_label, data_ts):
+    CHART_VER = "v3"  # ← 버전만 바꾸면 브라우저/서버 캐시가 깨짐!
     output_dir = os.path.join("static", "output")
     os.makedirs(output_dir, exist_ok=True)
-    file_name = f"{team}_{category}_radar.png"
+    file_name = f"{team}_{category}_radar_{CHART_VER}.png"
     save_path = os.path.join(output_dir, file_name)
+
+    # 캐시된 이미지가 있고, '데이터 갱신 시각'보다 새로우면 재사용
     if os.path.exists(save_path):
         if os.path.getmtime(save_path) >= data_ts - 1:
             return f"output/{file_name}"
+
+    # 새로 그림 (여기서는 draw_radar_chart가 새 스타일)
     return draw_radar_chart(df_score, team, category, compare_team_name=compare_label)
 
 # ---------- 워밍업 ----------
