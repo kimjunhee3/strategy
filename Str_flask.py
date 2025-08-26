@@ -3,6 +3,18 @@ import os, time
 import numpy as np
 import pandas as pd
 
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from matplotlib import font_manager, rcParams
+
+FONT_PATH = os.path.join('static', 'fonts', 'NanumGothic.ttf')  # 업로드한 폰트 경로
+if os.path.exists(FONT_PATH):
+    font_manager.fontManager.addfont(FONT_PATH)
+    rcParams['font.family'] = 'NanumGothic'
+
+rcParams['axes.unicode_minus'] = False
+
 # ---------- 캐시 ----------
 DATA_CACHE = {"ts": 0, "payload": None}
 DATA_TTL = 60*60*6  # 6시간
