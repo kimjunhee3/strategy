@@ -1,8 +1,10 @@
-# Str_flask.py
 from flask import Flask, render_template, request
 import os, time
 import numpy as np
 import pandas as pd
+
+DATA_CACHE = {"ts": 0, "payload": None}
+DATA_TTL = 60*60*6  # 6시간
 
 
 # 파이프라인/설정
@@ -11,6 +13,16 @@ from Str_cache import (
     batting_features, pitching_features, defense_features, running_features,
     metric_info, inverse_metrics as INV_METRICS
 )
+
+
+def get_cached_scores():
+    now = time.time()
+    if DATA_CACHE["payload"] and now - DATA_CACHE["ts"] < DATA_TTL:
+        return DATA_CACHE["payload"]
+    payload = get_all_scores()  # 기존 함수 (force=False)
+    DATA_CACHE["payload"] = payload
+    DATA_CACHE["ts"] = now
+    return payload
 
 
 # ---- 레이더 차트 (내장) ----
@@ -96,6 +108,20 @@ def draw_radar_chart(df_score: pd.DataFrame, team_name: str, category_name: str,
     return f"output/{file_name}"
 
 
+def draw_radar_chart_if_needed(df_score, team, category, compare_label, data_ts):
+    output_dir = os.path.join("static", "output")
+    os.makedirs(output_dir, exist_ok=True)
+    file_name = f"{team}_{category}_radar.png"
+    save_path = os.path.join(output_dir, file_name)
+
+    # 캐시된 이미지가 있고, 데이터보다 새로우면 그대로 재사용
+    if os.path.exists(save_path):
+        if os.path.getmtime(save_path) >= data_ts - 1:
+            return f"output/{file_name}"
+
+    # 아니면 새로 그림
+    return draw_radar_chart(df_score, team, category, compare_team_name=compare_label)
+
 # ---- Flask ----
 app = Flask(__name__, template_folder="templates", static_folder="static")
 
@@ -104,8 +130,9 @@ app = Flask(__name__, template_folder="templates", static_folder="static")
 def index():
     ensure_dirs()
     (score_hit, score_pitch, score_def, score_run,
-     df_hit, df_pitch, df_def, df_run,
-     clean_hit, clean_pitch, clean_def, clean_run) = get_all_scores()
+    df_hit, df_pitch, df_def, df_run,
+    clean_hit, clean_pitch, clean_def, clean_run) = get_cached_scores()
+
 
 
     if score_hit is None or score_hit.empty:
@@ -138,7 +165,9 @@ def index():
             else:
                 top3 = df_sorted.head(3)
                 avg_row = top3.iloc[:, 1:].mean(numeric_only=True); avg_row["팀"] = "상위 3팀 평균"
-            chart_path = draw_radar_chart(df, team, cat, compare_team_name=avg_row["팀"])
+            chart_path = draw_radar_chart_if_needed(
+    df, team, cat, compare_label=avg_row["팀"], data_ts=DATA_CACHE["ts"]
+)
             charts[cat] = chart_path
 
 
