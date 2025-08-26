@@ -3,38 +3,34 @@ import os, time
 import numpy as np
 import pandas as pd
 
+# ---------- 캐시 ----------
 DATA_CACHE = {"ts": 0, "payload": None}
 DATA_TTL = 60*60*6  # 6시간
 
-
-# 파이프라인/설정
+# ---------- 파이프라인/설정 ----------
 from Str_cache import (
     ensure_dirs, get_all_scores,
     batting_features, pitching_features, defense_features, running_features,
     metric_info, inverse_metrics as INV_METRICS
 )
 
-
 def get_cached_scores():
     now = time.time()
     if DATA_CACHE["payload"] and now - DATA_CACHE["ts"] < DATA_TTL:
         return DATA_CACHE["payload"]
-    payload = get_all_scores()  # 기존 함수 (force=False)
+    payload = get_all_scores()  # force=False
     DATA_CACHE["payload"] = payload
     DATA_CACHE["ts"] = now
     return payload
 
-
-# ---- 레이더 차트 (내장) ----
+# ---------- 차트 ----------
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-
 def draw_radar_chart(df_score: pd.DataFrame, team_name: str, category_name: str, compare_team_name="상위 3팀 평균") -> str:
     labels = df_score.columns[1:]
     angles = np.linspace(0, 2*np.pi, len(labels), endpoint=False).tolist()
-
 
     team_row = df_score[df_score["팀"] == team_name].iloc[0]
     score_col = df_score.columns[1]
@@ -43,28 +39,20 @@ def draw_radar_chart(df_score: pd.DataFrame, team_name: str, category_name: str,
     avg_row = top3[labels].mean()
     avg_row["팀"] = compare_team_name
 
-
     compare_df = pd.concat([team_row.to_frame().T, avg_row.to_frame().T], ignore_index=True)
-
 
     fig, ax = plt.subplots(figsize=(10, 10), subplot_kw=dict(polar=True))
     ax.set_ylim(0, 1.0)
     plot_angles = angles + angles[:1]
 
-
-    # 색상 지정: 팀=파랑, 평균=빨강
     team_line_color = "#007bff"
-    team_fill_color = "rgba(0,123,255,0.25)"  # 참고용 문자열, matplotlib에는 아래 fill에서 직접 RGBA 사용
     avg_line_color  = "#dc3545"
-    # matplotlib RGBA는 0~1 튜플 사용
     team_fill_rgba = (0/255, 123/255, 255/255, 0.25)
     avg_fill_rgba  = (220/255, 53/255, 69/255, 0.12)
-
 
     for idx, row in compare_df.iterrows():
         values = row[labels].values.tolist()
         values += values[:1]
-
 
         if idx == 0:
             line_color = team_line_color
@@ -75,28 +63,15 @@ def draw_radar_chart(df_score: pd.DataFrame, team_name: str, category_name: str,
             fill_rgba  = avg_fill_rgba
             lw, marker, ls = 2, 's', '--'
 
-
-        ax.plot(
-            plot_angles, values,
-            linewidth=lw,
-            marker=marker,
-            linestyle=ls,
-            color=line_color,         # ★ 선 색 명시
-            zorder=3
-        )
-        ax.fill(plot_angles, values, color=fill_rgba, zorder=2)  # ★ 채우기 색도 통일
-
+        ax.plot(plot_angles, values, linewidth=lw, marker=marker, linestyle=ls, color=line_color, zorder=3)
+        ax.fill(plot_angles, values, color=fill_rgba, zorder=2)
 
     ax.set_xticks(angles)
     ax.set_xticklabels(labels, fontsize=12)
     ax.set_title(f"{team_name}", fontsize=18, pad=30, fontweight='bold')
     ax.legend(["해당팀", compare_team_name], loc='upper right', bbox_to_anchor=(1.2, 1.0))
     ax.grid(True, alpha=0.6, linestyle='--', linewidth=1)
-
-
-    # 배경은 흰색 권장 (기존 파란색이면 대비가 떨어짐)
     ax.set_facecolor('white')
-
 
     output_dir = os.path.join("static", "output")
     os.makedirs(output_dir, exist_ok=True)
@@ -107,49 +82,49 @@ def draw_radar_chart(df_score: pd.DataFrame, team_name: str, category_name: str,
     plt.close()
     return f"output/{file_name}"
 
-
 def draw_radar_chart_if_needed(df_score, team, category, compare_label, data_ts):
     output_dir = os.path.join("static", "output")
     os.makedirs(output_dir, exist_ok=True)
     file_name = f"{team}_{category}_radar.png"
     save_path = os.path.join(output_dir, file_name)
-
-    # 캐시된 이미지가 있고, 데이터보다 새로우면 그대로 재사용
     if os.path.exists(save_path):
         if os.path.getmtime(save_path) >= data_ts - 1:
             return f"output/{file_name}"
-
-    # 아니면 새로 그림
     return draw_radar_chart(df_score, team, category, compare_team_name=compare_label)
 
-# ---- Flask ----
+# ---------- 워밍업 ----------
+def warmup():
+    import matplotlib
+    import matplotlib.pyplot as plt
+    matplotlib.get_cachedir()
+    fig, ax = plt.subplots()
+    ax.plot([0, 1], [0, 1])
+    plt.close(fig)
+
+# ---------- Flask 앱 ----------
 app = Flask(__name__, template_folder="templates", static_folder="static")
 
-# 🔥 Flask 3.x에서는 before_first_request가 없으므로 직접 한 번만 호출
+# 앱 시작 시 1회 준비
+ensure_dirs()
 try:
     warmup()
 except Exception as e:
     import logging
     logging.exception("Warmup failed: %s", e)
 
-
+# ---------- 라우트 ----------
 @app.route("/", methods=["GET", "POST"])
 def index():
-    ensure_dirs()
     (score_hit, score_pitch, score_def, score_run,
-    df_hit, df_pitch, df_def, df_run,
-    clean_hit, clean_pitch, clean_def, clean_run) = get_cached_scores()
-
-
+     df_hit, df_pitch, df_def, df_run,
+     clean_hit, clean_pitch, clean_def, clean_run) = get_cached_scores()
 
     if score_hit is None or score_hit.empty:
         return render_template("Bgraph.html", team_list=[], charts={}, analysis={}, warnings={}, last_update=None)
 
-
     team_list = score_hit["팀"].tolist()
     charts, analysis_results = {}, {}
     team = request.args.get("team") or request.form.get("team_name")
-
 
     if team and team in team_list:
         analysis_results = {
@@ -162,8 +137,7 @@ def index():
             }
         }
 
-
-        # --- 레이더: 팀 vs 상위3 평균(혹은 전체 평균) ---
+        # 레이더: 팀 vs 상위3 평균(혹은 전체 평균)
         for cat, df in [("타자", score_hit), ("투수", score_pitch), ("수비", score_def), ("주루", score_run)]:
             score_col = str(df.columns[1])
             df_sorted = df.sort_values(by=score_col, ascending=False).reset_index(drop=True)
@@ -179,21 +153,18 @@ def index():
             )
             charts[cat] = chart_path
 
-
-        # --- 전략 요약 (액션형 문구) ---
+        # 전략 요약
         def get_zone(v):
             if v >= 0.75: return "상"
             if v >= 0.5:  return "중상"
             if v >= 0.25: return "중하"
             return "하"
 
-
         def add_strategy(cat_name, df_score, label, msgs):
             if label in df_score.columns:
                 v = float(df_score.loc[df_score["팀"]==team, label].values[0])
                 z = get_zone(v)
                 analysis_results["categories"][cat_name]["main"].append(f"· {label} {msgs[z]}")
-
 
         # 투수
         add_strategy("투수", score_pitch, "불펜 전략", {
@@ -238,8 +209,7 @@ def index():
             "하":"소극적 → 도루 비중 축소·대주자 카드 상황 한정 운용"
         })
 
-
-        # --- 세부 진단 (정규화 낮은 영역 + 원시 ‘평균 이하/최하위권’만) ---
+        # 세부 진단
         def detailed(team, raw_df, scaled_df, features, category_name):
             out=[]
             def zone_from_quantile(val, qs, inverse=False):
@@ -254,7 +224,6 @@ def index():
                     if val<=q2: return "평균 이상"
                     if val<=q3: return "평균 이하"
                     return "최하위권"
-
 
             t_raw = raw_df[raw_df["팀"]==team].iloc[0]
             t_scl = scaled_df[scaled_df["팀"]==team].iloc[0]
@@ -278,19 +247,16 @@ def index():
                             })
             return out
 
-
         detailed_all=[]
         detailed_all += detailed(team, clean_hit,  score_hit,  batting_features, "타자")
         detailed_all += detailed(team, clean_pitch,score_pitch, pitching_features,"투수")
         detailed_all += detailed(team, clean_def,  score_def,  defense_features,"수비")
         detailed_all += detailed(team, clean_run,  score_run,  running_features,"주루")
 
-
         for d in detailed_all:
             analysis_results["categories"][d["category"]]["detail"].append(d)
 
-
-        # --- 경고 (정규화 약함 + 단일지표는 원시값 힌트) ---
+        # 경고
         warnings = {}
         bundle = {
             "타자": (score_hit,  clean_hit,  batting_features),
@@ -314,17 +280,14 @@ def index():
             if weak_msgs:
                 warnings[cat] = [f"⚠️ 주의: {len(labels)}개 지표 중 {len(weak_msgs)}개가 위험 수준입니다."] + weak_msgs
 
-
         last_update = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
         return render_template("Bgraph.html",
                                team_list=team_list, charts=charts,
                                analysis=analysis_results, warnings=warnings,
                                last_update=last_update)
 
-
     # 팀 선택 안 했을 때
     return render_template("Bgraph.html", team_list=team_list, charts={}, analysis={}, warnings={}, last_update=None)
-
 
 @app.route("/refresh")
 def refresh():
@@ -333,22 +296,8 @@ def refresh():
     DATA_CACHE["ts"] = time.time()
     return ("OK", 200)
 
-
-# Str_flask.py
-@app.before_first_request
-def warmup():
-    import matplotlib
-    import matplotlib.pyplot as plt
-    # 캐시 디렉토리 준비(없으면 생성)
-    matplotlib.get_cachedir()
-    # 초미니 플롯으로 백엔드/폰트 캐시 워밍업
-    fig, ax = plt.subplots()
-    ax.plot([0, 1], [0, 1])
-    plt.close(fig)
-
-
+# ---------- 실행 ----------
 if __name__ == "__main__":
-    ensure_dirs()
     import os
-    port = int(os.environ.get("PORT", 5055))  # 배포환경 PORT 사용, 없으면 로컬 5055
+    port = int(os.environ.get("PORT", 5055))
     app.run(host="0.0.0.0", port=port, debug=False)
