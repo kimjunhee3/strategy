@@ -9,28 +9,30 @@ import matplotlib.pyplot as plt
 from matplotlib import font_manager, rcParams
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-FONT_PATH = os.path.join(BASE_DIR, 'static', 'fonts', 'NanumGothic.ttf')
+candidate_paths = [
+    os.path.join(BASE_DIR, 'static', 'fonts', 'NanumGothic.ttf'),
+    os.path.join(BASE_DIR, 'static', 'NanumGothic.ttf'),
+]
+FONT_PATH = next((p for p in candidate_paths if os.path.exists(p)), candidate_paths[0])
 
 KFONT = None
 if os.path.exists(FONT_PATH):
-    # 파일을 등록하고 캐시 재생성 시도
     font_manager.fontManager.addfont(FONT_PATH)
     try:
-        # 내부 API지만 배포환경에서 캐시 문제 해결에 도움됨
+        # 내부 API지만 캐시 문제 해결에 도움됨
         font_manager._rebuild()
     except Exception:
         pass
-
     KFONT = font_manager.FontProperties(fname=FONT_PATH)
-    # 안정적으로 동작하도록 sans-serif 리스트로 설정
     rcParams['font.family'] = 'sans-serif'
     rcParams['font.sans-serif'] = [KFONT.get_name()]
-
-    # 전역 폰트 크기(원하시면 더 키우세요)
     rcParams['font.size'] = 14
     rcParams['axes.titlesize'] = 22
     rcParams['xtick.labelsize'] = 16
     rcParams['ytick.labelsize'] = 12
+else:
+    import logging
+    logging.warning("NanumGothic.ttf not found. looked at: %s", candidate_paths)
 
 # ---------- 캐시 ----------
 DATA_CACHE = {"ts": 0, "payload": None}
