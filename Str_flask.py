@@ -311,4 +311,4 @@ if __name__ == "__main__":
     ensure_dirs()
     import os
     port = int(os.environ.get("PORT", 5055))  # 배포환경 PORT 사용, 없으면 로컬 5055
-    app.run(host="0.0.0.0", port=port, debug=True)
+    app.run(host="0.0.0.0", port=port, debug=False)
