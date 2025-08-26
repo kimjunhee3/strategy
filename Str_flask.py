@@ -8,11 +8,14 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib import font_manager, rcParams
 
-FONT_PATH = os.path.join('static', 'fonts', 'NanumGothic.ttf')  # 업로드한 폰트 경로
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+FONT_PATH = os.path.join(BASE_DIR, 'static', 'fonts', 'NanumGothic.ttf')
+
+KFONT = None
 if os.path.exists(FONT_PATH):
     font_manager.fontManager.addfont(FONT_PATH)
-    rcParams['font.family'] = 'NanumGothic'
-
+    KFONT = font_manager.FontProperties(fname=FONT_PATH)
+    rcParams['font.family'] = KFONT.get_name()   # family를 실제 등록된 이름으로
 rcParams['axes.unicode_minus'] = False
 
 # ---------- 캐시 ----------
@@ -40,7 +43,8 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-def draw_radar_chart(df_score: pd.DataFrame, team_name: str, category_name: str, compare_team_name="상위 3팀 평균") -> str:
+def draw_radar_chart(df_score: pd.DataFrame, team_name: str, category_name: str,
+                     compare_team_name="상위 3팀 평균") -> str:
     labels = df_score.columns[1:]
     angles = np.linspace(0, 2*np.pi, len(labels), endpoint=False).tolist()
 
@@ -53,10 +57,12 @@ def draw_radar_chart(df_score: pd.DataFrame, team_name: str, category_name: str,
 
     compare_df = pd.concat([team_row.to_frame().T, avg_row.to_frame().T], ignore_index=True)
 
-    fig, ax = plt.subplots(figsize=(10, 10), subplot_kw=dict(polar=True))
+    # 크기/해상도 키워서 선명하게
+    fig, ax = plt.subplots(figsize=(9.5, 9.5), subplot_kw=dict(polar=True))
     ax.set_ylim(0, 1.0)
     plot_angles = angles + angles[:1]
 
+    # 스타일
     team_line_color = "#007bff"
     avg_line_color  = "#dc3545"
     team_fill_rgba = (0/255, 123/255, 255/255, 0.25)
@@ -65,7 +71,6 @@ def draw_radar_chart(df_score: pd.DataFrame, team_name: str, category_name: str,
     for idx, row in compare_df.iterrows():
         values = row[labels].values.tolist()
         values += values[:1]
-
         if idx == 0:
             line_color = team_line_color
             fill_rgba  = team_fill_rgba
@@ -74,23 +79,41 @@ def draw_radar_chart(df_score: pd.DataFrame, team_name: str, category_name: str,
             line_color = avg_line_color
             fill_rgba  = avg_fill_rgba
             lw, marker, ls = 2, 's', '--'
-
-        ax.plot(plot_angles, values, linewidth=lw, marker=marker, linestyle=ls, color=line_color, zorder=3)
+        ax.plot(plot_angles, values, linewidth=lw, marker=marker, linestyle=ls,
+                color=line_color, zorder=3)
         ax.fill(plot_angles, values, color=fill_rgba, zorder=2)
 
+    # 축/레이블/범례 —> KFONT 있을 때만 한 번에 세팅
     ax.set_xticks(angles)
-    ax.set_xticklabels(labels, fontsize=12)
-    ax.set_title(f"{team_name}", fontsize=18, pad=30, fontweight='bold')
-    ax.legend(["해당팀", compare_team_name], loc='upper right', bbox_to_anchor=(1.2, 1.0))
+
+    if KFONT is not None:
+        ax.set_xticklabels(labels, fontproperties=KFONT, fontsize=14)
+        ax.set_title(f"{team_name}", fontproperties=KFONT, fontsize=20, pad=28, fontweight='bold')
+        leg = ax.legend(["해당팀", compare_team_name], loc='upper right',
+                        bbox_to_anchor=(1.20, 1.02), prop=KFONT, fontsize=12)
+        # r(반지름) 눈금도 폰트 적용
+        for t in ax.get_yticklabels():
+            t.set_fontproperties(KFONT)
+            t.set_fontsize(12)
+    else:
+        ax.set_xticklabels(labels, fontsize=14)
+        ax.set_title(f"{team_name}", fontsize=20, pad=28, fontweight='bold')
+        leg = ax.legend(["해당팀", compare_team_name], loc='upper right',
+                        bbox_to_anchor=(1.20, 1.02), fontsize=12)
+        ax.tick_params(labelsize=12)
+
     ax.grid(True, alpha=0.6, linestyle='--', linewidth=1)
     ax.set_facecolor('white')
 
+    # 저장 경로 + 캐시 버전
     output_dir = os.path.join("static", "output")
     os.makedirs(output_dir, exist_ok=True)
-    file_name = f"{team_name}_{category_name}_radar.png"
+    CHART_VER = "v2"  # 필요 시 v3, v4로 변경하면 캐시 무효화
+    file_name = f"{team_name}_{category_name}_radar_{CHART_VER}.png"
     save_path = os.path.join(output_dir, file_name)
+
     plt.tight_layout()
-    plt.savefig(save_path, bbox_inches='tight', dpi=200, facecolor='white', edgecolor='none')
+    plt.savefig(save_path, bbox_inches='tight', dpi=240, facecolor='white', edgecolor='none')
     plt.close()
     return f"output/{file_name}"
 
