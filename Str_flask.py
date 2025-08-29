@@ -135,49 +135,56 @@ def index():
                 z = get_zone(v)
                 analysis_results["categories"][cat_name]["main"].append(f"· {label} {msgs[z]}")
 
-        # 투수
+        
+ # 투수 - 불펜 전략
         add_strategy("투수", score_pitch, "불펜 전략", {
-            "상":"우수 → 리드 시 중·후반 매니지먼트 유지(핵심 셋업 휴식일 관리)",
-            "중상":"양호 → 좌우 매치업/백투백 제한으로 효율 개선",
-            "중하":"다소 약함 → 롱릴리프 롤 명확화·역할 단순화",
-            "하":"취약 → 셋업/클로저 재정의·하이레버리지 투입 규칙 재설계"
-        })
-        # 타자
-        add_strategy("타자", score_hit, "찬스 대응", {
-            "상":"매우 우수 → 클러치 라인업 유지·2스트라이크 접근 유지",
-            "중상":"양호 → 고구속/변화구 분업 타석전략 미세조정",
-            "중하":"부족 → 중심타선 진루타 설계(번트/히트앤런) 가동",
-            "하":"취약 → 타순 재배열·선구 강화(초구 스윙률/존 통제)"
-        })
-        # 수비 - 관여/범위
-        add_strategy("수비", score_def, "수비 관여/범위", {
-            "상":"우수 → 타자성향 시프트 미세튜닝, 외야 시작 위치 유지",
-            "중상":"양호 → 중계 라인/백업 동선 반복으로 커버 범위 확대",
-            "중하":"다소 부족 → 코너 외야 2~3m 전진, 내야 수비 범위 훈련",
-            "하":"취약 → 타구분포 기반 시프트 규칙화·커뮤니케이션 루틴 재정립"
-        })
-        # 수비 - 도루 억제
-        add_strategy("수비", score_def, "도루 억제", {
-            "상":"우수 → 시도 자체 억제, 상황별 콜만 정교화",
-            "중상":"양호 → 투수 홀드/퀵모션 다양화(간헐적 2단 홀드)",
-            "중하":"다소 약함 → 포수 팝타임·송구 정확도 드릴, 1루 견제 상향",
-            "하":"취약 → 퀵모션 1.35s↓·팝타임 2.0s대 목표로 전면 재정비"
-        })
-        # 수비 - 안정성
-        add_strategy("수비", score_def, "수비 안정성", {
-            "상":"우수 → 강한 타구 대응·송구 속도 유지",
-            "중상":"양호 → 실책 유형(포구/송구) 분해 후 맞춤 훈련",
-            "중하":"다소 부족 → 송구 발끝 정렬·원바운드 정확도 강화",
-            "하":"취약 → 기본기 루틴 재학습, 쉬운 플레이 성공률부터 회복"
-        })
-        # 주루
-        add_strategy("주루", score_run, "도루 전략 판단", {
-            "상":"적극적 → 하이라스크·하이리턴 상황 선별 확대",
-            "중상":"양호 → 좌투수 상대로만 선택적 확대",
-            "중하":"다소 약함 → 스타트/리드 폭 보수화, 히트앤런로 대체",
-            "하":"소극적 → 도루 비중 축소·대주자 카드 상황 한정 운용"
+            "상":   "안정적입니다. 리드 상황은 잘 지키고 있으니 필승조(핵심 불펜) 휴식일만 관리하세요.",
+            "중상": "대체로 좋습니다. 좌우 투수 활용을 더 세밀하게 하고, 연속 등판만 줄이면 됩니다.",
+            "중하": "기복이 있습니다. 롱릴리프(긴 이닝 소화)와 브릿지(중간 계투) 역할을 명확히 나누세요.",
+            "하":   "불안합니다. 셋업·마무리 구성을 다시 짜고 경기 후반 운영 방식을 재정비하세요."
         })
 
+        # 타자 - 찬스 대응
+        add_strategy("타자", score_hit, "찬스 대응", {
+            "상":   "매우 좋습니다. 클러치 상황과 2스트라이크 대응을 그대로 유지하세요.",
+            "중상": "양호합니다. 빠른 공/변화구 대응 루틴을 조금만 다듬으세요.",
+            "중하": "아쉽습니다. 중심타선에서 진루타 전략(번트·히트앤런)을 늘리세요.",
+            "하":   "취약합니다. 타순 재배열과 초구 공략, 존 통제로 선구를 강화하세요."
+        })
+
+        # 수비 - 관여/범위
+        add_strategy("수비", score_def, "수비 관여/범위", {
+            "상":   "범위가 넓습니다. 현재 포지셔닝을 유지하세요.",
+            "중상": "무난합니다. 중계·백업 동선을 반복 훈련해 안정성을 높이세요.",
+            "중하": "다소 좁습니다. 외야 전진 수비와 내야 범위 훈련을 늘리세요.",
+            "하":   "제한적입니다. 타구 분포에 맞춘 수비 위치와 팀 간 소통을 강화하세요."
+        })
+
+        # 수비 - 도루 억제
+        add_strategy("수비", score_def, "도루 억제", {
+            "상":   "잘 억제합니다. 지금 수준을 유지하세요.",
+            "중상": "대체로 양호합니다. 투수 견제 동작을 조금 더 다양화하세요.",
+            "중하": "허용이 늘었습니다. 포수 송구 정확도와 1루 견제를 강화하세요.",
+            "하":   "취약합니다. 투수 동작과 포수 송구 모두 전면 재정비가 필요합니다."
+        })
+
+        # 수비 - 안정성
+        add_strategy("수비", score_def, "수비 안정성", {
+            "상":   "안정적입니다. 강한 타구 대응과 송구 속도를 유지하세요.",
+            "중상": "대체로 좋습니다. 실책 유형을 분석해 맞춤 훈련하세요.",
+            "중하": "흔들립니다. 송구 정확도와 기본 동작을 보완하세요.",
+            "하":   "불안정합니다. 기본기 루틴을 재학습해 쉬운 플레이 성공률부터 회복하세요."
+        })
+
+        # 주루 - 도루 전략 판단
+        add_strategy("주루", score_run, "도루 전략 판단", {
+            "상":   "효율적입니다. 도루 시도를 적극적으로 이어가세요.",
+            "중상": "무난합니다. 좌투수 상대에서 도루를 조금 더 활용하세요.",
+            "중하": "아쉽습니다. 도루 성공률이 낮아 리드 폭을 줄이고 히트앤런 같은 대체 작전을 고려하세요.",
+            "하":   "취약합니다. 도루가 잘 통하지 않아 비중을 줄이고 대주자 카드를 상황 한정으로 활용하세요."
+        })
+
+        
         # --- 세부 진단 (정규화 낮은 영역 + 원시 ‘평균 이하/최하위권’만) ---
         def detailed(team, raw_df, scaled_df, features, category_name):
             out=[]
@@ -257,6 +264,34 @@ def index():
 
     # 팀 선택 안 했을 때
     return render_template("Bgraph.html", team_list=team_list, charts={}, analysis={}, warnings={}, last_update=None)
+@app.route("/health")
+def health():
+    return "ok", 200
+
+@app.route("/debug")
+def debug():
+    try:
+        (score_hit, score_pitch, score_def, score_run,
+         df_hit, df_pitch, df_def, df_run,
+         clean_hit, clean_pitch, clean_def, clean_run) = get_all_scores()
+
+        def _shape(df):
+            try: return f"{df.shape[0]}x{df.shape[1]}"
+            except: return "None"
+
+        txt = [
+            f"df_hit_shape:  {_shape(df_hit)}",
+            f"df_pitch_shape:{_shape(df_pitch)}",
+            f"df_def_shape:  {_shape(df_def)}",
+            f"df_run_shape:  {_shape(df_run)}",
+            f"score_hit_cols:{list(score_hit.columns) if hasattr(score_hit,'columns') else []}",
+            f"team_list_preview:{score_hit['팀'].tolist()[:10] if hasattr(score_hit,'__getitem__') and '팀' in score_hit.columns else []}",
+        ]
+        return "\n".join(txt), 200, {"Content-Type":"text/plain; charset=utf-8"}
+    except Exception as e:
+        import traceback
+        return ("DEBUG ERROR:\n"+ "".join(traceback.format_exception(e)),
+                500, {"Content-Type":"text/plain; charset=utf-8"})
 
 @app.route("/refresh")
 def refresh():
