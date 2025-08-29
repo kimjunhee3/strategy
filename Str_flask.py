@@ -274,30 +274,29 @@ def debug():
         (score_hit, score_pitch, score_def, score_run,
          df_hit, df_pitch, df_def, df_run,
          clean_hit, clean_pitch, clean_def, clean_run) = get_all_scores()
-
-        def _shape(df):
+        def _shape(df): 
             try: return f"{df.shape[0]}x{df.shape[1]}"
             except: return "None"
-
-        txt = [
-            f"df_hit_shape:  {_shape(df_hit)}",
-            f"df_pitch_shape:{_shape(df_pitch)}",
-            f"df_def_shape:  {_shape(df_def)}",
-            f"df_run_shape:  {_shape(df_run)}",
-            f"score_hit_cols:{list(score_hit.columns) if hasattr(score_hit,'columns') else []}",
-            f"team_list_preview:{score_hit['팀'].tolist()[:10] if hasattr(score_hit,'__getitem__') and '팀' in score_hit.columns else []}",
-        ]
-        return "\n".join(txt), 200, {"Content-Type":"text/plain; charset=utf-8"}
+        return (
+            "hit "  + _shape(df_hit)  + "\n"
+            "pit "  + _shape(df_pitch)+ "\n"
+            "def "  + _shape(df_def)  + "\n"
+            "run "  + _shape(df_run)  + "\n"
+            "teams " + (",".join(score_hit["팀"].tolist()) if hasattr(score_hit, "columns") and "팀" in score_hit.columns else "")
+        , 200, {"Content-Type":"text/plain; charset=utf-8"})
     except Exception as e:
         import traceback
         return ("DEBUG ERROR:\n"+ "".join(traceback.format_exception(e)),
                 500, {"Content-Type":"text/plain; charset=utf-8"})
-
+        
 @app.route("/refresh")
 def refresh():
-    _ = get_all_scores(force=True)
-    return ("OK", 200)
-
+    try:
+        _ = get_all_scores(force=True)
+        return ("OK", 200)
+    except Exception as e:
+        return (f"ERROR: {e}", 502)
+        
 if __name__ == "__main__":
     ensure_dirs()
     app.run(debug=True, port=5055)
