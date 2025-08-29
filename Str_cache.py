@@ -213,6 +213,12 @@ def score_by_area(df: pd.DataFrame, feature_map: dict) -> pd.DataFrame:
         scored[area] = area_scores.mean(axis=1)
     return scored
 
+def _empty_payload():
+    empty = pd.DataFrame()
+    return (empty, empty, empty, empty,   # score_* 4개
+            empty, empty, empty, empty,   # df_* 4개
+            empty, empty, empty, empty)   # clean_* 4개
+
 
 def get_all_scores(force: bool=False):
     """
@@ -262,15 +268,17 @@ def get_all_scores(force: bool=False):
             df_def.to_csv(p_def,  index=False, encoding="utf-8-sig")
 
         except Exception as e:
-            # 네트워크/파싱 실패 → 캐시 존재 시 캐시로 폴백, 없으면 에러 재전파
+            import logging
+            logging.exception("Fetch failed, falling back: %s", e)
             if all(os.path.exists(p) for p in [p_hit, p_run, p_pit1, p_pit2, p_def]):
-                df_hit  = pd.read_csv(p_hit)
-                df_run  = pd.read_csv(p_run)
-                df_p1   = pd.read_csv(p_pit1)
-                df_p2   = pd.read_csv(p_pit2)
-                df_def  = pd.read_csv(p_def)
-            else:
-                raise
+            df_hit  = pd.read_csv(p_hit)
+            df_run  = pd.read_csv(p_run)
+            df_p1   = pd.read_csv(p_pit1)
+            df_p2   = pd.read_csv(p_pit2)
+            df_def  = pd.read_csv(p_def)
+        else:
+            # 초기 캐시도 없고 네트워크도 실패 → 빈 페이로드로 즉시 반환
+            return _empty_payload()
 
     # -----------------------------
     # 파생지표/경기당 환산
