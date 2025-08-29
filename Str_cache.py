@@ -4,6 +4,34 @@ import requests
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
 
+# --- Add: resilient requests session ---
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+CONNECT_TIMEOUT = 5
+READ_TIMEOUT = 12
+
+def _session_with_retry():
+    s = requests.Session()
+    retry = Retry(
+        total=4,               
+        connect=4, read=4,
+        backoff_factor=1.5,      
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET", "HEAD"]
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    s.mount("https://", adapter)
+    s.mount("http://", adapter)
+    s.headers.update({
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/122.0.0.0 Safari/537.36"),
+        "Referer": "https://www.koreabaseball.com/",
+        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8",
+    })
+    return s
+
 
 # -----------------------------
 # 경로/캐시 기본설정
@@ -130,26 +158,27 @@ metric_info = {
 # 유틸
 # -----------------------------
 def _fetch_html_tables(url: str) -> pd.DataFrame:
-    """requests + read_html"""
-    headers = {
-        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                       "AppleWebKit/537.36 (KHTML, like Gecko) "
-                       "Chrome/122.0.0.0 Safari/537.36"),
-        "Referer": "https://www.koreabaseball.com/",
-        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8",
-    }
-    r = requests.get(url, headers=headers, timeout=15)
+    """
+    requests + pandas.read_html with retry/backoff and split timeouts
+    """
+    s = _session_with_retry()
+    r = s.get(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT))
     r.raise_for_status()
     buf = io.StringIO(r.text)
     tables = pd.read_html(buf, flavor="lxml")
     if not tables:
-        raise ValueError("No table found in page")
+        raise ValueError(f"No table found in page: {url}")
     return tables[0]
+
+
 def _to_numeric(df: pd.DataFrame, cols):
     for c in cols:
         if c in df.columns:
-            df[c] = pd.to_numeric(df[c].astype(str).str.replace('%','', regex=False),
-                                  errors="coerce").fillna(0)
+            df[c] = pd.to_numeric(
+                df[c].astype(str).str.replace('%','', regex=False),
+                errors="coerce"
+            ).fillna(0)
+
 
 
 # -----------------------------
@@ -193,14 +222,12 @@ def get_all_scores(force: bool=False):
     """
     ensure_dirs()
 
-
     # 캐시 경로
     p_hit  = cache_path("df_hit.csv")
     p_run  = cache_path("df_run.csv")
     p_pit1 = cache_path("df_pitch1.csv")
     p_pit2 = cache_path("df_pitch2.csv")
     p_def  = cache_path("df_def.csv")
-
 
     fresh = all(cache_fresh(p) for p in [p_hit, p_run, p_pit1, p_pit2, p_def])
     if fresh and not force:
@@ -210,32 +237,40 @@ def get_all_scores(force: bool=False):
         df_p2   = pd.read_csv(p_pit2)
         df_def  = pd.read_csv(p_def)
     else:
-        # 크롤링
-        df_hit1 = _fetch_html_tables("https://www.koreabaseball.com/Record/Team/Hitter/Basic1.aspx")
-        df_hit2 = _fetch_html_tables("https://www.koreabaseball.com/Record/Team/Hitter/Basic2.aspx")
-        df_hit  = pd.merge(df_hit1, df_hit2, on="팀명", how="outer").rename(columns={"팀명":"팀"})
+        # 원격 크롤 시도 + 실패 시 캐시 폴백
+        try:
+            # --- 크롤링 ---
+            df_hit1 = _fetch_html_tables("https://www.koreabaseball.com/Record/Team/Hitter/Basic1.aspx")
+            df_hit2 = _fetch_html_tables("https://www.koreabaseball.com/Record/Team/Hitter/Basic2.aspx")
+            df_hit  = pd.merge(df_hit1, df_hit2, on="팀명", how="outer").rename(columns={"팀명":"팀"})
 
+            df_run  = _fetch_html_tables("https://www.koreabaseball.com/Record/Team/Runner/Basic.aspx").rename(columns={"팀명":"팀"})
 
-        df_run  = _fetch_html_tables("https://www.koreabaseball.com/Record/Team/Runner/Basic.aspx").rename(columns={"팀명":"팀"})
+            df_p1   = _fetch_html_tables("https://www.koreabaseball.com/Record/Team/Pitcher/Basic1.aspx")
+            df_p2   = _fetch_html_tables("https://www.koreabaseball.com/Record/Team/Pitcher/Basic2.aspx")
+            dup_cols = [c for c in df_p2.columns if c in df_p1.columns and c!="팀명"]
+            df_pitch = pd.merge(df_p1, df_p2.drop(columns=dup_cols), on="팀명", how="outer").rename(columns={"팀명":"팀"})
+            df_p1, df_p2 = df_pitch.copy(), df_pitch.copy()
 
+            df_def  = _fetch_html_tables("https://www.koreabaseball.com/Record/Team/Defense/Basic.aspx").rename(columns={"팀명":"팀"})
 
-        df_p1   = _fetch_html_tables("https://www.koreabaseball.com/Record/Team/Pitcher/Basic1.aspx")
-        df_p2   = _fetch_html_tables("https://www.koreabaseball.com/Record/Team/Pitcher/Basic2.aspx")
-        dup_cols = [c for c in df_p2.columns if c in df_p1.columns and c!="팀명"]
-        df_pitch = pd.merge(df_p1, df_p2.drop(columns=dup_cols), on="팀명", how="outer").rename(columns={"팀명":"팀"})
-        df_p1, df_p2 = df_pitch.copy(), df_pitch.copy()
+            # --- 캐시 저장 ---
+            df_hit.to_csv(p_hit,  index=False, encoding="utf-8-sig")
+            df_run.to_csv(p_run,  index=False, encoding="utf-8-sig")
+            df_p1.to_csv(p_pit1,  index=False, encoding="utf-8-sig")
+            df_p2.to_csv(p_pit2,  index=False, encoding="utf-8-sig")
+            df_def.to_csv(p_def,  index=False, encoding="utf-8-sig")
 
-
-        df_def  = _fetch_html_tables("https://www.koreabaseball.com/Record/Team/Defense/Basic.aspx").rename(columns={"팀명":"팀"})
-
-
-        # 캐시 저장
-        df_hit.to_csv(p_hit, index=False, encoding="utf-8-sig")
-        df_run.to_csv(p_run, index=False, encoding="utf-8-sig")
-        df_p1.to_csv(p_pit1, index=False, encoding="utf-8-sig")
-        df_p2.to_csv(p_pit2, index=False, encoding="utf-8-sig")
-        df_def.to_csv(p_def, index=False, encoding="utf-8-sig")
-
+        except Exception as e:
+            # 네트워크/파싱 실패 → 캐시 존재 시 캐시로 폴백, 없으면 에러 재전파
+            if all(os.path.exists(p) for p in [p_hit, p_run, p_pit1, p_pit2, p_def]):
+                df_hit  = pd.read_csv(p_hit)
+                df_run  = pd.read_csv(p_run)
+                df_p1   = pd.read_csv(p_pit1)
+                df_p2   = pd.read_csv(p_pit2)
+                df_def  = pd.read_csv(p_def)
+            else:
+                raise
 
     # -----------------------------
     # 파생지표/경기당 환산
@@ -248,22 +283,22 @@ def get_all_scores(force: bool=False):
             if col in df_hit.columns:
                 df_hit[f"{col}_per_G"] = pd.to_numeric(df_hit[col], errors="coerce").fillna(0) / g
 
-
     # 투수 (IP decimal + per_G + P/IP)
     df_pitch = df_p1
     if "IP" in df_pitch.columns:
         def _ip_to_decimal(v):
             try:
-                s=str(v).strip()
-                if not s: return 0.0
-                if ' ' in s:
+                s = str(v).strip()
+                if not s:
+                    return 0.0
+                if " " in s:
                     whole, frac = s.split()
-                    num,den = frac.split('/')
-                    return float(whole) + float(num)/float(den)
+                    num, den = frac.split("/")
+                    return float(whole) + float(num) / float(den)
                 return float(s)
-            except: return 0.0
+            except:
+                return 0.0
         df_pitch["IP"] = df_pitch["IP"].apply(_ip_to_decimal)
-
 
     _to_numeric(df_pitch, ["G","QS","SO","BB","HLD","SV","BSV","NP","WP","BK","WPCT","ERA","WHIP"])
     g_p = df_pitch["G"].replace(0,1) if "G" in df_pitch.columns else 1
@@ -276,7 +311,6 @@ def get_all_scores(force: bool=False):
         df_pitch["P/IP"] = (pd.to_numeric(df_pitch["NP"], errors="coerce").fillna(0) /
                             df_pitch["IP"].replace(0, pd.NA)).fillna(0)
 
-
     # 수비
     _to_numeric(df_def, ["G","E","PKO","PO","A","DP","PB","SB","CS","FPCT","CS%"])
     g_d = df_def["G"].replace(0,1) if "G" in df_def.columns else 1
@@ -285,13 +319,12 @@ def get_all_scores(force: bool=False):
             df_def[f"{col}_per_G"] = pd.to_numeric(df_def[col], errors="coerce").fillna(0) / g_d
     if {"PO","A"}.issubset(df_def.columns):
         df_def["RF_per_G"] = (pd.to_numeric(df_def["PO"], errors="coerce").fillna(0) +
-                              pd.to_numeric(df_def["A"],  errors="coerce").fillna(0)) / g_d
+                              pd.to_numeric(df_def["A"], errors="coerce").fillna(0)) / g_d
     else:
         df_def["RF_per_G"] = 0.0
     # 수비/주루 관점 분리
     df_def["CS_def_per_G"]  = df_def.get("CS_per_G",  0)
     df_def["PKO_def_per_G"] = df_def.get("PKO_per_G", 0)
-
 
     # 주루
     _to_numeric(df_run, ["G","SB","CS","OOB","PKO","SB%"])
@@ -302,7 +335,6 @@ def get_all_scores(force: bool=False):
     df_run["CS_run_per_G"]  = df_run.get("CS_per_G",  0)
     df_run["PKO_run_per_G"] = df_run.get("PKO_per_G", 0)
 
-
     # -----------------------------
     # 정제/스코어링
     # -----------------------------
@@ -311,16 +343,15 @@ def get_all_scores(force: bool=False):
     clean_def   = clean_and_extract(df_def.rename(columns={"팀":"팀"}),   defense_features)
     clean_run   = clean_and_extract(df_run.rename(columns={"팀":"팀"}),   running_features)
 
-
     score_hit   = score_by_area(clean_hit,   batting_features)
     score_pitch = score_by_area(clean_pitch, pitching_features)
     score_def   = score_by_area(clean_def,   defense_features)
     score_run   = score_by_area(clean_run,   running_features)
 
-
     return (score_hit, score_pitch, score_def, score_run,
             df_hit, df_pitch, df_def, df_run,
             clean_hit, clean_pitch, clean_def, clean_run)
+
 
 
 if __name__ == "__main__":
