@@ -47,11 +47,30 @@ from Str_cache import (
     metric_info, inverse_metrics as INV_METRICS
 )
 
-def get_cached_scores():
+def get_cached_scores(allow_fetch: bool = False):
+    """
+    홈(/)에서는 allow_fetch=False로 호출하여 절대 즉시 크롤링하지 않음.
+    - 캐시에 있으면 캐시 반환
+    - 캐시에 없고 allow_fetch=False면 '빈 페이로드' 반환(템플릿이 안전하게 처리)
+    - /refresh에서만 allow_fetch=True로 강제 최신화(fetch) 수행
+    """
+    def _empty_payload():
+        # (score_hit, score_pitch, score_def, score_run,
+        #  df_hit, df_pitch, df_def, df_run,
+        #  clean_hit, clean_pitch, clean_def, clean_run)
+        return (None, None, None, None, None, None, None, None, None, None, None, None)
+
     now = time.time()
+    # 1) 신선한 캐시가 있으면 그대로 반환
     if DATA_CACHE["payload"] and now - DATA_CACHE["ts"] < DATA_TTL:
         return DATA_CACHE["payload"]
-    payload = get_all_scores()  # force=False
+
+    # 2) 홈 진입 등: 즉시 크롤 금지 → 캐시 없으면 빈 페이로드
+    if not allow_fetch:
+        return DATA_CACHE["payload"] or _empty_payload()
+
+    # 3) 명시적 최신화(예: /refresh)일 때만 크롤 시도
+    payload = get_all_scores()  # force=False (Str_cache 내부 재시도/백오프 가정)
     DATA_CACHE["payload"] = payload
     DATA_CACHE["ts"] = now
     return payload
@@ -183,14 +202,29 @@ except Exception as e:
     logging.exception("Warmup failed: %s", e)
 
 # ---------- 라우트 ----------
-@app.route("/", methods=["GET", "POST"])
+
+@app.route("/health", methods=["GET", "HEAD"])
+def health():
+    return "ok", 200
+    
+@app.route("/", methods=["GET", "POST", "HEAD"])
 def index():
+    # UptimeRobot이 HEAD / 로 두드리는 경우 즉시 204로 종료 (크롤 유발 방지)
+    if request.method == "HEAD":
+        return ("", 204)
+
     (score_hit, score_pitch, score_def, score_run,
      df_hit, df_pitch, df_def, df_run,
-     clean_hit, clean_pitch, clean_def, clean_run) = get_cached_scores()
+     clean_hit, clean_pitch, clean_def, clean_run) = get_cached_scores(allow_fetch=False)
 
-    if score_hit is None or score_hit.empty:
-        return render_template("Bgraph.html", team_list=[], charts={}, analysis={}, warnings={}, last_update=None)
+    # 캐시가 없거나 비어 있으면 빈 화면(안내 문구)으로 안전하게 렌더
+    if score_hit is None or (hasattr(score_hit, "empty") and score_hit.empty):
+        return render_template("Bgraph.html",
+                               team_list=[],
+                               charts={},
+                               analysis={},
+                               warnings={},
+                               last_update=None)
 
     team_list = score_hit["팀"].tolist()
     charts, analysis_results = {}, {}
@@ -357,6 +391,7 @@ def index():
                 warnings[cat] = [f"⚠️ 주의: {len(labels)}개 지표 중 {len(weak_msgs)}개가 위험 수준입니다."] + weak_msgs
 
         last_update = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+
         return render_template(
             "Bgraph.html",
             team_list=team_list,
@@ -366,15 +401,19 @@ def index():
             last_update=last_update
         )
 
-    # 팀 선택 안 했을 때
-    return render_template("Bgraph.html", team_list=team_list, charts={}, analysis={}, warnings={}, last_update=None)
+    # 팀 선택 안 했을 때는 여기서 처리
+    return render_template("Bgraph.html",
+                           team_list=team_list,
+                           charts={},
+                           analysis={},
+                           warnings={},
+                           last_update=None)
 
 @app.route("/refresh")
 def refresh():
-    payload = get_all_scores(force=True)
-    DATA_CACHE["payload"] = payload
-    DATA_CACHE["ts"] = time.time()
+    payload = get_cached_scores(allow_fetch=True)  # ← 여기만 포인트!
     return ("OK", 200)
+    
 
 # ---------- 실행 ----------
 if __name__ == "__main__":
