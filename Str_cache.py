@@ -3,6 +3,31 @@ import os, io, time, json
 import requests
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+CONNECT_TIMEOUT = 5
+READ_TIMEOUT = 12
+
+def _session_with_retry():
+    s = requests.Session()
+    retry = Retry(
+        total=4, connect=4, read=4,
+        backoff_factor=1.5,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET", "HEAD"],
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    s.mount("https://", adapter); s.mount("http://", adapter)
+    s.headers.update({
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/122.0.0.0 Safari/537.36"),
+        "Referer": "https://www.koreabaseball.com/",
+        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8",
+    })
+    return s
+
 
 # -----------------------------
 # 경로/캐시 기본설정
@@ -79,6 +104,7 @@ metric_info = {
     "SF_per_G": {"desc": "희생플라이로 주자 진루가 부족합니다."},
     "OBP": {"desc": "출루율이 낮아 타선 연결이 매끄럽지 않습니다."},
 
+
     # 투수
     "WHIP": {"desc": "이닝당 출루 허용이 많아 위기 노출이 잦습니다."},
     "HLD_per_G": {"desc": "불펜이 약해 리드를 지키지 못합니다."},
@@ -92,38 +118,42 @@ metric_info = {
     "WP_per_G": {"desc": "폭투가 잦아 주자 관리가 불안정합니다."},
     "BK_per_G": {"desc": "보크 빈도가 높아 투구 동작 안정성이 떨어집니다."},
 
-    # 수비(강화)
-    "FPCT": {"desc": "수비율이 낮아 기본적인 안정성이 부족합니다."},
-    "E_per_G": {"desc": "실책이 많아 수비에서 실점 위험이 큽니다."},
-    "PO_per_G": {"desc": "자살(포구 관여)이 적어 타구 처리 개입이 부족합니다."},
-    "A_per_G":  {"desc": "보조(Assists)가 적어 송구/중계·연계 개입이 드뭅니다."},
-    "RF_per_G": {"desc": "PO+A 기준 수비 관여가 적어 전체 수비 범위가 좁습니다."},
-    "DP_per_G": {"desc": "병살 전환 빈도가 낮아 수비 연계력이 제한적입니다."},
-    "CS_def_per_G": {"desc": "도루 저지 수가 적어 상대 주루 억제가 부족합니다."},
-    "PKO_def_per_G": {"desc": "견제 아웃이 적어 1루 리드 폭을 줄이지 못합니다."},
-    "PB_per_G": {"desc": "포일/패스트볼이 잦아 공 수비 안정감이 떨어집니다."},
-    "SB_per_G": {"desc": "상대 도루 허용이 많아 배터리 억제력이 부족합니다."},
-    "CS%": {"desc": "도루 저지율이 낮아 2루 견제가 효과적이지 못합니다."},
+    
+    "FPCT": {"desc": "수비율이 낮아 기본 안정성이 부족합니다."},
+    "E_per_G": {"desc": "실책이 많아 수비 불안이 큽니다."},
+    "PO_per_G": {"desc": "아웃 처리 관여가 적어 수비 개입이 부족합니다."},
+    "A_per_G":  {"desc": "송구·중계 개입이 적어 연결 플레이가 약합니다."},
+    "RF_per_G": {"desc": "수비 관여 범위가 좁아 커버 폭이 제한적입니다."},
+    "DP_per_G": {"desc": "병살 연결이 적어 수비 연계력이 떨어집니다."},
+    "CS_def_per_G": {"desc": "도루 저지가 적어 상대 주루를 막지 못합니다."},
+    "PKO_def_per_G": {"desc": "견제 아웃이 적어 주자 리드를 줄이지 못합니다."},
+    "PB_per_G": {"desc": "포일·폭투가 잦아 포수 안정감이 부족합니다."},
+    "SB_per_G": {"desc": "상대 도루 허용이 많아 억제력이 약합니다."},
+    "CS%": {"desc": "도루 저지율이 낮아 2루 견제가 잘 되지 않습니다."},
+
+
 
     # 주루(강화)
-    "SB": {"desc": "도루 시도가 많지만 효율성 점검이 필요합니다."}, 
+    "SB": {"desc": "도루 시도가 많지만 효율성 점검이 필요합니다."},
     "SB%": {"desc": "도루 성공률이 낮아 작전 효율이 떨어집니다."},
     "OOB_per_G": {"desc": "주루사/무리한 플레이로 아웃이 많습니다."},
     "CS_run_per_G": {"desc": "주루 과정에서 잡히는 빈도가 높아 리스크 관리가 부족합니다."},
     "PKO_run_per_G": {"desc": "견제사 빈도가 높아 리드·스타트 타이밍 조정이 필요합니다."},
 }
 
+
+
 # -----------------------------
 # 유틸
 # -----------------------------
 def _fetch_html_tables(url: str) -> pd.DataFrame:
-    """requests + read_html (FutureWarning 회피)"""
-    r = requests.get(url, timeout=15)
+    s = _session_with_retry()
+    r = s.get(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT))
     r.raise_for_status()
     buf = io.StringIO(r.text)
     tables = pd.read_html(buf, flavor="lxml")
     if not tables:
-        raise ValueError("No table found in page")
+        raise ValueError(f"No table found in page: {url}")
     return tables[0]
 
 def _to_numeric(df: pd.DataFrame, cols):
