@@ -7,7 +7,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 CONNECT_TIMEOUT = 5
-READ_TIMEOUT = 12
+READ_TIMEOUT = 15
 
 def _session_with_retry():
     s = requests.Session()
