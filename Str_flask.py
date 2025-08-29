@@ -1,46 +1,107 @@
-# Str_flask.py
+Str_flask.py
+
+
 from flask import Flask, render_template, request
 import os, time
 import numpy as np
 import pandas as pd
 
-# 파이프라인/설정
+
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from matplotlib import font_manager, rcParams
+
+CHART_VER = "v5"
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+candidate_paths = [
+    os.path.join(BASE_DIR, 'static', 'fonts', 'NanumGothic.ttf'),
+    os.path.join(BASE_DIR, 'static', 'NanumGothic.ttf'),
+]
+FONT_PATH = next((p for p in candidate_paths if os.path.exists(p)), candidate_paths[0])
+
+KFONT = None
+if os.path.exists(FONT_PATH):
+    font_manager.fontManager.addfont(FONT_PATH)
+    try:
+        # 내부 API지만 캐시 문제 해결에 도움됨
+        font_manager._rebuild()
+    except Exception:
+        pass
+    KFONT = font_manager.FontProperties(fname=FONT_PATH)
+    rcParams['font.family'] = 'sans-serif'
+    rcParams['font.sans-serif'] = [KFONT.get_name()]
+    rcParams['font.size'] = 14
+    rcParams['axes.titlesize'] = 22
+    rcParams['xtick.labelsize'] = 16
+    rcParams['ytick.labelsize'] = 12
+else:
+    import logging
+    logging.warning("NanumGothic.ttf not found. looked at: %s", candidate_paths)
+
+# ---------- 캐시 ----------
+DATA_CACHE = {"ts": 0, "payload": None}
+DATA_TTL = 60*60*6  # 6시간
+
+# ---------- 파이프라인/설정 ----------
 from Str_cache import (
     ensure_dirs, get_all_scores,
     batting_features, pitching_features, defense_features, running_features,
     metric_info, inverse_metrics as INV_METRICS
 )
 
-# ---- 레이더 차트 (내장) ----
+def get_cached_scores():
+    now = time.time()
+    if DATA_CACHE["payload"] and now - DATA_CACHE["ts"] < DATA_TTL:
+        return DATA_CACHE["payload"]
+    payload = get_all_scores()  # force=False
+    DATA_CACHE["payload"] = payload
+    DATA_CACHE["ts"] = now
+    return payload
+
+# ---------- 차트 ----------
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-def draw_radar_chart(df_score: pd.DataFrame, team_name: str, category_name: str, compare_team_name="상위 3팀 평균") -> str:
-    labels = df_score.columns[1:]
+def draw_radar_chart(
+    df_score: pd.DataFrame,
+    team_name: str,
+    category_name: str,
+    compare_team_name: str = "상위 3팀 평균",
+) -> str:
+    # 1) 축 라벨/각도 준비
+    labels = df_score.columns[1:]  # 첫 컬럼은 '팀'
     angles = np.linspace(0, 2*np.pi, len(labels), endpoint=False).tolist()
 
+    # 2) 비교용 데이터 (해당 팀 vs 상위3 평균)
     team_row = df_score[df_score["팀"] == team_name].iloc[0]
     score_col = df_score.columns[1]
     df_sorted = df_score.sort_values(by=score_col, ascending=False).reset_index(drop=True)
+
     top3 = df_sorted.head(3)
     avg_row = top3[labels].mean()
     avg_row["팀"] = compare_team_name
 
     compare_df = pd.concat([team_row.to_frame().T, avg_row.to_frame().T], ignore_index=True)
 
-    fig, ax = plt.subplots(figsize=(10, 10), subplot_kw=dict(polar=True))
-    ax.set_ylim(0, 1.0)
-    plot_angles = angles + angles[:1]
+    # 3) 차트 기본 설정 (라벨을 밖으로 빼기 위해 여백/반경 여유)
+    fig, ax = plt.subplots(figsize=(11.0, 11.0), subplot_kw=dict(polar=True))
+    r_max = 1.0
+    ax.set_ylim(0, r_max)
 
-    # 색상 지정: 팀=파랑, 평균=빨강
+    plot_angles = angles + angles[:1]
+    ax.set_xticks(angles)
+    ax.set_xticklabels([])  # 기본 각도 라벨 숨김(바깥쪽에 직접 배치)
+
+    # 4) 스타일 (색/투명도)
     team_line_color = "#007bff"
-    team_fill_color = "rgba(0,123,255,0.25)"  # 참고용 문자열, matplotlib에는 아래 fill에서 직접 RGBA 사용
     avg_line_color  = "#dc3545"
-    # matplotlib RGBA는 0~1 튜플 사용
     team_fill_rgba = (0/255, 123/255, 255/255, 0.25)
     avg_fill_rgba  = (220/255, 53/255, 69/255, 0.12)
 
+    # 5) 폴리곤 그리기 (팀 / 비교대상)
     for idx, row in compare_df.iterrows():
         values = row[labels].values.tolist()
         values += values[:1]
@@ -54,43 +115,105 @@ def draw_radar_chart(df_score: pd.DataFrame, team_name: str, category_name: str,
             fill_rgba  = avg_fill_rgba
             lw, marker, ls = 2, 's', '--'
 
-        ax.plot(
-            plot_angles, values,
-            linewidth=lw,
-            marker=marker,
-            linestyle=ls,
-            color=line_color,         # ★ 선 색 명시
-            zorder=3
-        )
-        ax.fill(plot_angles, values, color=fill_rgba, zorder=2)  # ★ 채우기 색도 통일
+        ax.plot(plot_angles, values, linewidth=lw, marker=marker, linestyle=ls,
+                color=line_color, zorder=3)
+        ax.fill(plot_angles, values, color=fill_rgba, zorder=2)
 
-    ax.set_xticks(angles)
-    ax.set_xticklabels(labels, fontsize=12)
-    ax.set_title(f"{team_name}", fontsize=18, pad=30, fontweight='bold')
-    ax.legend(["해당팀", compare_team_name], loc='upper right', bbox_to_anchor=(1.2, 1.0))
+    # 6) 바깥쪽 라벨 수동 배치 (원 밖으로, 글씨 크게)
+    label_radius = r_max * 1.15  # 바깥쪽으로 10% 더
+    def _ha_for_angle(rad):
+        deg = np.degrees(rad) % 360
+        if 5 < deg < 175:
+            return 'left'
+        if 185 < deg < 355:
+            return 'right'
+        return 'center'
+
+    for ang, lab in zip(angles, labels):
+        ha = _ha_for_angle(ang)
+        if KFONT is not None:
+            ax.text(ang, label_radius, lab, ha=ha, va='center',
+                    fontproperties=KFONT, fontsize=18)
+        else:
+            ax.text(ang, label_radius, lab, ha=ha, va='center', fontsize=18)
+
+    # 7) 반지름 눈금 폰트
+    if KFONT is not None:
+        for t in ax.get_yticklabels():
+            t.set_fontproperties(KFONT)
+            t.set_fontsize(13)
+    else:
+        ax.tick_params(labelsize=13)
+
+    # 8) 제목/범례
+    if KFONT is not None:
+        ax.legend(["해당팀", compare_team_name],
+                  loc='upper right', bbox_to_anchor=(1.20, 1.02),
+                  prop=KFONT, fontsize=15)
+    else:
+        #ax.set_title(f"{team_name}", fontsize=24, pad=32, fontweight='bold')
+        ax.legend(["해당팀", compare_team_name],
+                  loc='upper right', bbox_to_anchor=(1.20, 1.02),
+                  fontsize=15)
+
+    # 9) 격자/배경
     ax.grid(True, alpha=0.6, linestyle='--', linewidth=1)
-
-    # 배경은 흰색 권장 (기존 파란색이면 대비가 떨어짐)
     ax.set_facecolor('white')
 
+    # 10) 저장 (전역 CHART_VER 사용)
     output_dir = os.path.join("static", "output")
     os.makedirs(output_dir, exist_ok=True)
-    file_name = f"{team_name}_{category_name}_radar.png"
+
+    file_name = f"{team_name}_{category_name}_radar_{CHART_VER}.png"
     save_path = os.path.join(output_dir, file_name)
+
     plt.tight_layout()
-    plt.savefig(save_path, bbox_inches='tight', dpi=200, facecolor='white', edgecolor='none')
+    plt.savefig(save_path, bbox_inches='tight', dpi=220, facecolor='white', edgecolor='none')
     plt.close()
+
     return f"output/{file_name}"
 
-# ---- Flask ----
+
+def draw_radar_chart_if_needed(df_score, team, category, compare_label, data_ts):
+    output_dir = os.path.join("static", "output")
+    os.makedirs(output_dir, exist_ok=True)
+
+    file_name = f"{team}_{category}_radar_{CHART_VER}.png"
+    save_path = os.path.join(output_dir, file_name)
+
+    # 캐시된 이미지가 있고 데이터보다 최신이면 재사용
+    if os.path.exists(save_path) and (os.path.getmtime(save_path) >= data_ts - 1):
+        return f"output/{file_name}"
+
+    # 없으면 새로 그림 (저장도 같은 파일명으로)
+    return draw_radar_chart(df_score, team, category, compare_team_name=compare_label)
+
+# ---------- 워밍업 ----------
+def warmup():
+    import matplotlib
+    import matplotlib.pyplot as plt
+    matplotlib.get_cachedir()
+    fig, ax = plt.subplots()
+    ax.plot([0, 1], [0, 1])
+    plt.close(fig)
+
+# ---------- Flask 앱 ----------
 app = Flask(__name__, template_folder="templates", static_folder="static")
 
+# 앱 시작 시 1회 준비
+ensure_dirs()
+try:
+    warmup()
+except Exception as e:
+    import logging
+    logging.exception("Warmup failed: %s", e)
+
+# ---------- 라우트 ----------
 @app.route("/", methods=["GET", "POST"])
 def index():
-    ensure_dirs()
     (score_hit, score_pitch, score_def, score_run,
      df_hit, df_pitch, df_def, df_run,
-     clean_hit, clean_pitch, clean_def, clean_run) = get_all_scores()
+     clean_hit, clean_pitch, clean_def, clean_run) = get_cached_scores()
 
     if score_hit is None or score_hit.empty:
         return render_template("Bgraph.html", team_list=[], charts={}, analysis={}, warnings={}, last_update=None)
@@ -110,7 +233,7 @@ def index():
             }
         }
 
-        # --- 레이더: 팀 vs 상위3 평균(혹은 전체 평균) ---
+        # 레이더: 팀 vs 상위3 평균(혹은 전체 평균)
         for cat, df in [("타자", score_hit), ("투수", score_pitch), ("수비", score_def), ("주루", score_run)]:
             score_col = str(df.columns[1])
             df_sorted = df.sort_values(by=score_col, ascending=False).reset_index(drop=True)
@@ -119,10 +242,14 @@ def index():
             else:
                 top3 = df_sorted.head(3)
                 avg_row = top3.iloc[:, 1:].mean(numeric_only=True); avg_row["팀"] = "상위 3팀 평균"
-            chart_path = draw_radar_chart(df, team, cat, compare_team_name=avg_row["팀"])
+            chart_path = draw_radar_chart_if_needed(
+                df, team, cat,
+                compare_label=avg_row["팀"],
+                data_ts=DATA_CACHE["ts"]
+            )
             charts[cat] = chart_path
 
-        # --- 전략 요약 (액션형 문구) ---
+        # 전략 요약
         def get_zone(v):
             if v >= 0.75: return "상"
             if v >= 0.5:  return "중상"
@@ -135,57 +262,50 @@ def index():
                 z = get_zone(v)
                 analysis_results["categories"][cat_name]["main"].append(f"· {label} {msgs[z]}")
 
-        
- # 투수 - 불펜 전략
+        # 투수
         add_strategy("투수", score_pitch, "불펜 전략", {
-            "상":   "안정적입니다. 리드 상황은 잘 지키고 있으니 필승조(핵심 불펜) 휴식일만 관리하세요.",
-            "중상": "대체로 좋습니다. 좌우 투수 활용을 더 세밀하게 하고, 연속 등판만 줄이면 됩니다.",
-            "중하": "기복이 있습니다. 롱릴리프(긴 이닝 소화)와 브릿지(중간 계투) 역할을 명확히 나누세요.",
-            "하":   "불안합니다. 셋업·마무리 구성을 다시 짜고 경기 후반 운영 방식을 재정비하세요."
+            "상":"우수 → 리드 시 중·후반 매니지먼트 유지(핵심 셋업 휴식일 관리)",
+            "중상":"양호 → 좌우 매치업/백투백 제한으로 효율 개선",
+            "중하":"다소 약함 → 롱릴리프 롤 명확화·역할 단순화",
+            "하":"취약 → 셋업/클로저 재정의·하이레버리지 투입 규칙 재설계"
         })
-
-        # 타자 - 찬스 대응
+        # 타자
         add_strategy("타자", score_hit, "찬스 대응", {
-            "상":   "매우 좋습니다. 클러치 상황과 2스트라이크 대응을 그대로 유지하세요.",
-            "중상": "양호합니다. 빠른 공/변화구 대응 루틴을 조금만 다듬으세요.",
-            "중하": "아쉽습니다. 중심타선에서 진루타 전략(번트·히트앤런)을 늘리세요.",
-            "하":   "취약합니다. 타순 재배열과 초구 공략, 존 통제로 선구를 강화하세요."
+            "상":"매우 우수 → 클러치 라인업 유지·2스트라이크 접근 유지",
+            "중상":"양호 → 고구속/변화구 분업 타석전략 미세조정",
+            "중하":"부족 → 중심타선 진루타 설계(번트/히트앤런) 가동",
+            "하":"취약 → 타순 재배열·선구 강화(초구 스윙률/존 통제)"
         })
-
         # 수비 - 관여/범위
         add_strategy("수비", score_def, "수비 관여/범위", {
-            "상":   "범위가 넓습니다. 현재 포지셔닝을 유지하세요.",
-            "중상": "무난합니다. 중계·백업 동선을 반복 훈련해 안정성을 높이세요.",
-            "중하": "다소 좁습니다. 외야 전진 수비와 내야 범위 훈련을 늘리세요.",
-            "하":   "제한적입니다. 타구 분포에 맞춘 수비 위치와 팀 간 소통을 강화하세요."
+            "상":"우수 → 타자성향 시프트 미세튜닝, 외야 시작 위치 유지",
+            "중상":"양호 → 중계 라인/백업 동선 반복으로 커버 범위 확대",
+            "중하":"다소 부족 → 코너 외야 2~3m 전진, 내야 수비 범위 훈련",
+            "하":"취약 → 타구분포 기반 시프트 규칙화·커뮤니케이션 루틴 재정립"
         })
-
         # 수비 - 도루 억제
         add_strategy("수비", score_def, "도루 억제", {
-            "상":   "잘 억제합니다. 지금 수준을 유지하세요.",
-            "중상": "대체로 양호합니다. 투수 견제 동작을 조금 더 다양화하세요.",
-            "중하": "허용이 늘었습니다. 포수 송구 정확도와 1루 견제를 강화하세요.",
-            "하":   "취약합니다. 투수 동작과 포수 송구 모두 전면 재정비가 필요합니다."
+            "상":"우수 → 시도 자체 억제, 상황별 콜만 정교화",
+            "중상":"양호 → 투수 홀드/퀵모션 다양화(간헐적 2단 홀드)",
+            "중하":"다소 약함 → 포수 팝타임·송구 정확도 드릴, 1루 견제 상향",
+            "하":"취약 → 퀵모션 1.35s↓·팝타임 2.0s대 목표로 전면 재정비"
         })
-
         # 수비 - 안정성
         add_strategy("수비", score_def, "수비 안정성", {
-            "상":   "안정적입니다. 강한 타구 대응과 송구 속도를 유지하세요.",
-            "중상": "대체로 좋습니다. 실책 유형을 분석해 맞춤 훈련하세요.",
-            "중하": "흔들립니다. 송구 정확도와 기본 동작을 보완하세요.",
-            "하":   "불안정합니다. 기본기 루틴을 재학습해 쉬운 플레이 성공률부터 회복하세요."
+            "상":"우수 → 강한 타구 대응·송구 속도 유지",
+            "중상":"양호 → 실책 유형(포구/송구) 분해 후 맞춤 훈련",
+            "중하":"다소 부족 → 송구 발끝 정렬·원바운드 정확도 강화",
+            "하":"취약 → 기본기 루틴 재학습, 쉬운 플레이 성공률부터 회복"
         })
-
-        # 주루 - 도루 전략 판단
+        # 주루
         add_strategy("주루", score_run, "도루 전략 판단", {
-            "상":   "효율적입니다. 도루 시도를 적극적으로 이어가세요.",
-            "중상": "무난합니다. 좌투수 상대에서 도루를 조금 더 활용하세요.",
-            "중하": "아쉽습니다. 도루 성공률이 낮아 리드 폭을 줄이고 히트앤런 같은 대체 작전을 고려하세요.",
-            "하":   "취약합니다. 도루가 잘 통하지 않아 비중을 줄이고 대주자 카드를 상황 한정으로 활용하세요."
+            "상":"적극적 → 하이라스크·하이리턴 상황 선별 확대",
+            "중상":"양호 → 좌투수 상대로만 선택적 확대",
+            "중하":"다소 약함 → 스타트/리드 폭 보수화, 히트앤런로 대체",
+            "하":"소극적 → 도루 비중 축소·대주자 카드 상황 한정 운용"
         })
 
-        
-        # --- 세부 진단 (정규화 낮은 영역 + 원시 ‘평균 이하/최하위권’만) ---
+        # 세부 진단
         def detailed(team, raw_df, scaled_df, features, category_name):
             out=[]
             def zone_from_quantile(val, qs, inverse=False):
@@ -232,7 +352,7 @@ def index():
         for d in detailed_all:
             analysis_results["categories"][d["category"]]["detail"].append(d)
 
-        # --- 경고 (정규화 약함 + 단일지표는 원시값 힌트) ---
+        # 경고
         warnings = {}
         bundle = {
             "타자": (score_hit,  clean_hit,  batting_features),
@@ -264,40 +384,18 @@ def index():
 
     # 팀 선택 안 했을 때
     return render_template("Bgraph.html", team_list=team_list, charts={}, analysis={}, warnings={}, last_update=None)
-@app.route("/health")
-def health():
-    return "ok", 200
 
-@app.route("/debug")
-def debug():
-    try:
-        (score_hit, score_pitch, score_def, score_run,
-         df_hit, df_pitch, df_def, df_run,
-         clean_hit, clean_pitch, clean_def, clean_run) = get_all_scores()
-        def _shape(df): 
-            try: return f"{df.shape[0]}x{df.shape[1]}"
-            except: return "None"
-        return (
-            "hit "  + _shape(df_hit)  + "\n"
-            "pit "  + _shape(df_pitch)+ "\n"
-            "def "  + _shape(df_def)  + "\n"
-            "run "  + _shape(df_run)  + "\n"
-            "teams " + (",".join(score_hit["팀"].tolist()) if hasattr(score_hit, "columns") and "팀" in score_hit.columns else "")
-        , 200, {"Content-Type":"text/plain; charset=utf-8"})
-    except Exception as e:
-        import traceback
-        return ("DEBUG ERROR:\n"+ "".join(traceback.format_exception(e)),
-                500, {"Content-Type":"text/plain; charset=utf-8"})
-        
 @app.route("/refresh")
 def refresh():
-    try:
-        _ = get_all_scores(force=True)
-        return ("OK", 200)
-    except Exception as e:
-        return (f"ERROR: {e}", 502)
-        
+    payload = get_all_scores(force=True)
+    DATA_CACHE["payload"] = payload
+    DATA_CACHE["ts"] = time.time()
+    return ("OK", 200)
+
+# ---------- 실행 ----------
 if __name__ == "__main__":
-    ensure_dirs()
-    app.run(debug=True, port=5055)
-    
+    import os
+    port = int(os.environ.get("PORT", 5055))
+    app.run(host="0.0.0.0", port=port, debug=False)
+
+
