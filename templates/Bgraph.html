@@ -62,8 +62,7 @@
         <div class="tab-pane fade {% if loop.first %}show active{% endif %}" id="tabpane-{{ category }}" role="tabpanel">
           <div class="flex-layout">
             <div class="left-chart">
-              <img src="/static/{{ chart_path }}" class="chart-img" alt="{{ category }} 차트">
-
+              <img src="{{ url_for('static', filename=chart_path) }}" class="chart-img" alt="{{ category }} 차트">
               {% if warnings and warnings.get(category) %}
                 <div class="warning-section">
                   <div class="warning-title">
