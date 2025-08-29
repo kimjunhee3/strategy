@@ -2,6 +2,7 @@ from flask import Flask, render_template, request
 import os, time
 import numpy as np
 import pandas as pd
+import threading
 
 # ---------- Matplotlib / 폰트 ----------
 import matplotlib
@@ -200,6 +201,15 @@ try:
 except Exception as e:
     import logging
     logging.exception("Warmup failed: %s", e)
+
+def _startup_fetch():
+    try:
+        get_cached_scores(allow_fetch=True)
+    except Exception as ex:
+        import logging
+        logging.exception("Startup fetch failed: %s", ex)
+
+threading.Thread(target=_startup_fetch, daemon=True).start()
 
 # ---------- 라우트 ----------
 
