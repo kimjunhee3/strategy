@@ -247,8 +247,33 @@ def render_index(payload):
     (score_hit, score_pitch, score_def, score_run,
      df_hit, df_pitch, df_def, df_run,
      clean_hit, clean_pitch, clean_def, clean_run) = payload
-    
 
+
+    def _team_list_from_disk_cache():
+        try:
+            p = os.path.join("static", "cache", "df_hit.csv")
+            if os.path.exists(p):
+                df = pd.read_csv(p)
+                if "팀" in df.columns:
+                   return df["팀"].dropna().unique().tolist()
+        except Exception:
+            pass
+        return []
+
+def render_index(payload):
+    ...
+    # 캐시/데이터가 아직 없으면 빈 화면
+    if score_hit is None or (isinstance(score_hit, pd.DataFrame) and score_hit.empty):
+        team_list_fallback = _team_list_from_disk_cache()
+        return render_template(
+            "Bgraph.html",
+            team_list=team_list_fallback,   # ← 최소한 팀 선택은 가능
+            charts={}, analysis={}, warnings={},
+            last_update=None
+        )
+
+
+    
     # 캐시/데이터가 아직 없으면 빈 화면
     if score_hit is None or isinstance(score_hit, pd.DataFrame) and score_hit.empty:
         return render_template("Bgraph.html",
@@ -443,9 +468,14 @@ def render_index(payload):
 def index():
     payload = read_payload_from_cache()
     if payload is None:
-        # 네트워크 수집은 백그라운드에서 시작하고, 화면은 즉시 반환
-        warm_up_async(force=False)
-        payload = empty_stub_payload()
+        # ➊ 동기 한 번 시도 (빠른 실패)
+        ok = _fetch_and_update_cache(force=False, attempts=1, base_sleep=0.5)
+        if ok:
+            payload = read_payload_from_cache()
+        else:
+            # ➋ 실패하면 비동기 워밍 + 스텁 반환
+            warm_up_async(force=False)
+            payload = empty_stub_payload()
     return render_index(payload)
 
 @app.route("/healthz")
