@@ -28,7 +28,6 @@ def _session_with_retry():
     })
     return s
 
-
 # -----------------------------
 # 경로/캐시 기본설정
 # -----------------------------
@@ -176,6 +175,13 @@ def clean_and_extract(df: pd.DataFrame, feature_map: dict) -> pd.DataFrame:
                 df[col] = 0.0
     return df
 
+def _empty_payload():
+    empty = pd.DataFrame()
+    return (empty, empty, empty, empty,   # score_* 4
+            empty, empty, empty, empty,   # df_* 4
+            empty, empty, empty, empty)  
+
+
 def score_by_area(df: pd.DataFrame, feature_map: dict) -> pd.DataFrame:
     scored = pd.DataFrame({"팀": df["팀"]})
     scaler = MinMaxScaler()
@@ -201,7 +207,6 @@ def get_all_scores(force: bool=False):
     """
     ensure_dirs()
 
-    # 캐시 경로
     p_hit  = cache_path("df_hit.csv")
     p_run  = cache_path("df_run.csv")
     p_pit1 = cache_path("df_pitch1.csv")
@@ -210,34 +215,43 @@ def get_all_scores(force: bool=False):
 
     fresh = all(cache_fresh(p) for p in [p_hit, p_run, p_pit1, p_pit2, p_def])
     if fresh and not force:
-        df_hit  = pd.read_csv(p_hit)
-        df_run  = pd.read_csv(p_run)
-        df_p1   = pd.read_csv(p_pit1)
-        df_p2   = pd.read_csv(p_pit2)
-        df_def  = pd.read_csv(p_def)
+        df_hit = pd.read_csv(p_hit);  df_run = pd.read_csv(p_run)
+        df_p1  = pd.read_csv(p_pit1); df_p2  = pd.read_csv(p_pit2)
+        df_def = pd.read_csv(p_def)
     else:
-        # 크롤링
-        df_hit1 = _fetch_html_tables("https://www.koreabaseball.com/Record/Team/Hitter/Basic1.aspx")
-        df_hit2 = _fetch_html_tables("https://www.koreabaseball.com/Record/Team/Hitter/Basic2.aspx")
-        df_hit  = pd.merge(df_hit1, df_hit2, on="팀명", how="outer").rename(columns={"팀명":"팀"})
+        try:
+            # --- 크롤링 ---
+            df_hit1 = _fetch_html_tables("https://www.koreabaseball.com/Record/Team/Hitter/Basic1.aspx")
+            df_hit2 = _fetch_html_tables("https://www.koreabaseball.com/Record/Team/Hitter/Basic2.aspx")
+            df_hit  = pd.merge(df_hit1, df_hit2, on="팀명", how="outer").rename(columns={"팀명":"팀"})
 
-        df_run  = _fetch_html_tables("https://www.koreabaseball.com/Record/Team/Runner/Basic.aspx").rename(columns={"팀명":"팀"})
+            df_run  = _fetch_html_tables("https://www.koreabaseball.com/Record/Team/Runner/Basic.aspx").rename(columns={"팀명":"팀"})
 
-        df_p1   = _fetch_html_tables("https://www.koreabaseball.com/Record/Team/Pitcher/Basic1.aspx")
-        df_p2   = _fetch_html_tables("https://www.koreabaseball.com/Record/Team/Pitcher/Basic2.aspx")
-        dup_cols = [c for c in df_p2.columns if c in df_p1.columns and c!="팀명"]
-        df_pitch = pd.merge(df_p1, df_p2.drop(columns=dup_cols), on="팀명", how="outer").rename(columns={"팀명":"팀"})
-        df_p1, df_p2 = df_pitch.copy(), df_pitch.copy()
+            df_p1   = _fetch_html_tables("https://www.koreabaseball.com/Record/Team/Pitcher/Basic1.aspx")
+            df_p2   = _fetch_html_tables("https://www.koreabaseball.com/Record/Team/Pitcher/Basic2.aspx")
+            dup_cols = [c for c in df_p2.columns if c in df_p1.columns and c!="팀명"]
+            df_pitch = pd.merge(df_p1, df_p2.drop(columns=dup_cols), on="팀명", how="outer").rename(columns={"팀명":"팀"})
+            df_p1, df_p2 = df_pitch.copy(), df_pitch.copy()
 
-        df_def  = _fetch_html_tables("https://www.koreabaseball.com/Record/Team/Defense/Basic.aspx").rename(columns={"팀명":"팀"})
+            df_def  = _fetch_html_tables("https://www.koreabaseball.com/Record/Team/Defense/Basic.aspx").rename(columns={"팀명":"팀"})
 
-        # 캐시 저장
-        df_hit.to_csv(p_hit, index=False, encoding="utf-8-sig")
-        df_run.to_csv(p_run, index=False, encoding="utf-8-sig")
-        df_p1.to_csv(p_pit1, index=False, encoding="utf-8-sig")
-        df_p2.to_csv(p_pit2, index=False, encoding="utf-8-sig")
-        df_def.to_csv(p_def, index=False, encoding="utf-8-sig")
+            # --- 캐시 저장 ---
+            df_hit.to_csv(p_hit, index=False, encoding="utf-8-sig")
+            df_run.to_csv(p_run, index=False, encoding="utf-8-sig")
+            df_p1.to_csv(p_pit1, index=False, encoding="utf-8-sig")
+            df_p2.to_csv(p_pit2, index=False, encoding="utf-8-sig")
+            df_def.to_csv(p_def, index=False, encoding="utf-8-sig")
 
+        except Exception as e:
+            import logging, traceback
+            logging.exception("Fetch failed, trying cache fallback: %s", e)
+            if all(os.path.exists(p) for p in [p_hit, p_run, p_pit1, p_pit2, p_def]):
+                df_hit = pd.read_csv(p_hit);  df_run = pd.read_csv(p_run)
+                df_p1  = pd.read_csv(p_pit1); df_p2  = pd.read_csv(p_pit2)
+                df_def = pd.read_csv(p_def)
+            else:
+                # 캐시도 없음 → 완전 빈 페이로드로 반환 (앱이 죽지 않도록)
+                return _empty_payload()
     # -----------------------------
     # 파생지표/경기당 환산
     # -----------------------------
