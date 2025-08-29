@@ -411,9 +411,19 @@ def index():
 
 @app.route("/refresh")
 def refresh():
-    payload = get_cached_scores(allow_fetch=True)  # ← 여기만 포인트!
-    return ("OK", 200)
-    
+    try:
+        # 네트워크 크롤 강제 실행
+        payload = get_all_scores(force=True)  # Str_cache에서 직접 가져옴
+        # 메모리 캐시 갱신
+        DATA_CACHE["payload"] = payload
+        DATA_CACHE["ts"] = time.time()
+        return ("OK", 200)
+    except Exception as e:
+        import logging, traceback
+        logging.exception("Refresh failed: %s", e)
+        # 500 대신 원인 메시지와 함께 502로 응답 (서비스는 계속 살아있게)
+        return (f"ERROR: {e.__class__.__name__}: {e}", 502)
+
 
 # ---------- 실행 ----------
 if __name__ == "__main__":
