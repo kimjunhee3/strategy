@@ -49,11 +49,12 @@ from Str_cache import (
 
 # ---------- 유틸 ----------
 def empty_stub_payload():
-    """템플릿이 기대하는 12-튜플 구조를 빈 값으로 반환."""
-    empty_scores = [pd.DataFrame(columns=["팀"]) for _ in range(4)]
-    empty_raws   = [pd.DataFrame(columns=["팀"]) for _ in range(4)]
-    return (*empty_scores, *empty_raws)  # (score_hit, score_pitch, score_def, score_run, df_hit, df_pitch, df_def, df_run, clean_hit, clean_pitch, clean_def, clean_run)
-
+    """템플릿이 기대하는 12-튜플(스코어4, raw4, clean4)을 빈 값으로 반환."""
+    empty_scores = [pd.DataFrame(columns=["팀"]) for _ in range(4)]  # score_hit, score_pitch, score_def, score_run
+    empty_raws   = [pd.DataFrame(columns=["팀"]) for _ in range(4)]  # df_hit,   df_pitch,   df_def,   df_run
+    empty_cleans = [pd.DataFrame(columns=["팀"]) for _ in range(4)]  # clean_hit,clean_pitch,clean_def,clean_run
+    return (*empty_scores, *empty_raws, *empty_cleans)
+    
 def read_payload_from_cache():
     """애플리케이션 메모리 캐시 사용(파일 캐시 X)."""
     if DATA_CACHE["payload"] is None:
@@ -234,9 +235,19 @@ def warm_up_async(force=False):
 
 # ---------- 렌더링 ----------
 def render_index(payload):
+    # 8-튜플(과거 스텁 등)이 들어와도 12-튜플로 보정
+    if isinstance(payload, (list, tuple)) and len(payload) == 8:
+        (score_hit, score_pitch, score_def, score_run,
+         df_hit, df_pitch, df_def, df_run) = payload
+        clean_hit, clean_pitch, clean_def, clean_run = df_hit, df_pitch, df_def, df_run
+        payload = (score_hit, score_pitch, score_def, score_run,
+                   df_hit, df_pitch, df_def, df_run,
+                   clean_hit, clean_pitch, clean_def, clean_run)
+
     (score_hit, score_pitch, score_def, score_run,
      df_hit, df_pitch, df_def, df_run,
      clean_hit, clean_pitch, clean_def, clean_run) = payload
+    
 
     # 캐시/데이터가 아직 없으면 빈 화면
     if score_hit is None or isinstance(score_hit, pd.DataFrame) and score_hit.empty:
