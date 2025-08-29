@@ -3,6 +3,7 @@ import os, time
 import numpy as np
 import pandas as pd
 
+# ---------- Matplotlib / 폰트 ----------
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -34,9 +35,10 @@ else:
     import logging
     logging.warning("NanumGothic.ttf not found. looked at: %s", candidate_paths)
 
-# ---------- 캐시 ----------
+# ---------- 전역 상수 ----------
 DATA_CACHE = {"ts": 0, "payload": None}
 DATA_TTL = 60*60*6  # 6시간
+CHART_VER = "v3"    # ← 차트 캐시 버전: 여기만 바꾸면 전체 반영됨
 
 # ---------- 파이프라인/설정 ----------
 from Str_cache import (
@@ -55,10 +57,6 @@ def get_cached_scores():
     return payload
 
 # ---------- 차트 ----------
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-
 def draw_radar_chart(
     df_score: pd.DataFrame,
     team_name: str,
@@ -81,7 +79,6 @@ def draw_radar_chart(
     compare_df = pd.concat([team_row.to_frame().T, avg_row.to_frame().T], ignore_index=True)
 
     # 3) 차트 기본 설정
-    # - 글자 크게 보이게 figsize를 조금 키움
     fig, ax = plt.subplots(figsize=(10.5, 10.5), subplot_kw=dict(polar=True))
     ax.set_ylim(0, 1.0)
     plot_angles = angles + angles[:1]
@@ -111,15 +108,12 @@ def draw_radar_chart(
                 color=line_color, zorder=3)
         ax.fill(plot_angles, values, color=fill_rgba, zorder=2)
 
-    # 6) 라벨/제목/범례: NanumGothic 있으면 그걸로, 없으면 기본 폰트
+    # 6) 라벨/제목/범례
     if KFONT is not None:
-        # 축(각도) 라벨
         ax.set_xticklabels(labels, fontproperties=KFONT, fontsize=16)
-        # 반지름 눈금(0.2, 0.4, ...)도 폰트 지정
         for t in ax.get_yticklabels():
             t.set_fontproperties(KFONT)
             t.set_fontsize(12)
-        # 제목/범례
         ax.set_title(f"{team_name}", fontproperties=KFONT, fontsize=22,
                      pad=30, fontweight='bold')
         ax.legend(["해당팀", compare_team_name],
@@ -137,11 +131,9 @@ def draw_radar_chart(
     ax.grid(True, alpha=0.6, linestyle='--', linewidth=1)
     ax.set_facecolor('white')
 
-    # 8) 저장 (파일명에 버전 suffix -> 캐시 무효화 용이)
+    # 8) 저장 (공용 버전 상수 사용)
     output_dir = os.path.join("static", "output")
     os.makedirs(output_dir, exist_ok=True)
-
-    CHART_VER = "v2"
     file_name = f"{team_name}_{category_name}_radar_{CHART_VER}.png"
     save_path = os.path.join(output_dir, file_name)
 
@@ -149,11 +141,9 @@ def draw_radar_chart(
     plt.savefig(save_path, bbox_inches='tight', dpi=220, facecolor='white', edgecolor='none')
     plt.close()
 
-    # 템플릿에서는 /static/ 접두어가 자동으로 붙으니 상대 경로만 반환
     return f"output/{file_name}"
 
 def draw_radar_chart_if_needed(df_score, team, category, compare_label, data_ts):
-    CHART_VER = "v3"  # ← 버전만 바꾸면 브라우저/서버 캐시가 깨짐!
     output_dir = os.path.join("static", "output")
     os.makedirs(output_dir, exist_ok=True)
     file_name = f"{team}_{category}_radar_{CHART_VER}.png"
@@ -164,7 +154,7 @@ def draw_radar_chart_if_needed(df_score, team, category, compare_label, data_ts)
         if os.path.getmtime(save_path) >= data_ts - 1:
             return f"output/{file_name}"
 
-    # 새로 그림 (여기서는 draw_radar_chart가 새 스타일)
+    # 새로 그림
     return draw_radar_chart(df_score, team, category, compare_team_name=compare_label)
 
 # ---------- 워밍업 ----------
@@ -178,6 +168,11 @@ def warmup():
 
 # ---------- Flask 앱 ----------
 app = Flask(__name__, template_folder="templates", static_folder="static")
+
+# 파비콘(404 방지)
+@app.route('/favicon.ico')
+def favicon():
+    return app.send_static_file('favicon.ico')
 
 # 앱 시작 시 1회 준비
 ensure_dirs()
@@ -228,8 +223,7 @@ def index():
             )
             charts[cat] = chart_path
 
-        # 전략 요약
-              # 전략 요약
+        # ---------- 전략 요약 ----------
         def get_zone(v):
             if v >= 0.75: return "상"
             if v >= 0.5:  return "중상"
@@ -238,7 +232,7 @@ def index():
 
         def add_strategy(cat_name, df_score, label, msgs):
             if label in df_score.columns:
-                v = float(df_score.loc[df_score["팀"]==team, label].values[0])
+                v = float(df_score.loc[df_score["팀"] == team, label].values[0])
                 z = get_zone(v)
                 analysis_results["categories"][cat_name]["main"].append(f"· {label} {msgs[z]}")
 
@@ -290,25 +284,25 @@ def index():
             "하":   "취약합니다. 도루가 잘 통하지 않아 비중을 줄이고 대주자 카드를 상황 한정으로 활용하세요."
         })
 
-
-        # 세부 진단
+        # ---------- 세부 진단 ----------
         def detailed(team, raw_df, scaled_df, features, category_name):
-            out=[]
+            out = []
+
             def zone_from_quantile(val, qs, inverse=False):
-                q1,q2,q3 = qs
+                q1, q2, q3 = qs
                 if not inverse:
-                    if val>=q3: return "최상위권"
-                    if val>=q2: return "평균 이상"
-                    if val>=q1: return "평균 이하"
+                    if val >= q3: return "최상위권"
+                    if val >= q2: return "평균 이상"
+                    if val >= q1: return "평균 이하"
                     return "최하위권"
                 else:
-                    if val<=q1: return "최상위권"
-                    if val<=q2: return "평균 이상"
-                    if val<=q3: return "평균 이하"
+                    if val <= q1: return "최상위권"
+                    if val <= q2: return "평균 이상"
+                    if val <= q3: return "평균 이하"
                     return "최하위권"
 
-            t_raw = raw_df[raw_df["팀"]==team].iloc[0]
-            t_scl = scaled_df[scaled_df["팀"]==team].iloc[0]
+            t_raw = raw_df[raw_df["팀"] == team].iloc[0]
+            t_scl = scaled_df[scaled_df["팀"] == team].iloc[0]
             for area, metrics in features.items():
                 if area not in scaled_df.columns:
                     continue
@@ -317,7 +311,7 @@ def index():
                     for m in metrics:
                         if m in raw_df.columns:
                             val = float(t_raw[m])
-                            qs = raw_df[m].quantile([0.25,0.5,0.75]).values
+                            qs = raw_df[m].quantile([0.25, 0.5, 0.75]).values
                             inverse = (m in INV_METRICS)
                             z = zone_from_quantile(val, qs, inverse)
                             if z not in ("평균 이하", "최하위권"):
@@ -329,44 +323,48 @@ def index():
                             })
             return out
 
-        detailed_all=[]
-        detailed_all += detailed(team, clean_hit,  score_hit,  batting_features, "타자")
-        detailed_all += detailed(team, clean_pitch,score_pitch, pitching_features,"투수")
-        detailed_all += detailed(team, clean_def,  score_def,  defense_features,"수비")
-        detailed_all += detailed(team, clean_run,  score_run,  running_features,"주루")
+        detailed_all = []
+        detailed_all += detailed(team, clean_hit,   score_hit,   batting_features,  "타자")
+        detailed_all += detailed(team, clean_pitch, score_pitch, pitching_features, "투수")
+        detailed_all += detailed(team, clean_def,   score_def,   defense_features,  "수비")
+        detailed_all += detailed(team, clean_run,   score_run,   running_features,  "주루")
 
         for d in detailed_all:
             analysis_results["categories"][d["category"]]["detail"].append(d)
 
-        # 경고
+        # ---------- 경고 ----------
         warnings = {}
         bundle = {
-            "타자": (score_hit,  clean_hit,  batting_features),
-            "투수": (score_pitch,clean_pitch,pitching_features),
-            "수비": (score_def,  clean_def,  defense_features),
-            "주루": (score_run,  clean_run,  running_features),
+            "타자": (score_hit,   clean_hit,   batting_features),
+            "투수": (score_pitch, clean_pitch, pitching_features),
+            "수비": (score_def,   clean_def,   defense_features),
+            "주루": (score_run,   clean_run,   running_features),
         }
         for cat, (df_s, df_r, fmap) in bundle.items():
             labels = df_s.columns[1:]
-            row_s = df_s[df_s["팀"]==team].iloc[0]
-            row_r = df_r[df_r["팀"]==team].iloc[0]
-            weak_msgs=[]
+            row_s = df_s[df_s["팀"] == team].iloc[0]
+            row_r = df_r[df_r["팀"] == team].iloc[0]
+            weak_msgs = []
             for lab in labels:
                 val = float(row_s[lab])
                 if val < 0.3:
                     metrics = fmap.get(lab, [])
-                    raw_hint=""
-                    if len(metrics)==1 and metrics[0] in row_r.index:
+                    raw_hint = ""
+                    if len(metrics) == 1 and metrics[0] in row_r.index:
                         raw_hint = f", 원시: {metrics[0]}={float(row_r[metrics[0]]):.3f}"
                     weak_msgs.append(f"📉 {lab}: {val:.3f} (즉시 개선 필요{raw_hint})")
             if weak_msgs:
                 warnings[cat] = [f"⚠️ 주의: {len(labels)}개 지표 중 {len(weak_msgs)}개가 위험 수준입니다."] + weak_msgs
 
         last_update = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-        return render_template("Bgraph.html",
-                               team_list=team_list, charts=charts,
-                               analysis=analysis_results, warnings=warnings,
-                               last_update=last_update)
+        return render_template(
+            "Bgraph.html",
+            team_list=team_list,
+            charts=charts,
+            analysis=analysis_results,
+            warnings=warnings,
+            last_update=last_update
+        )
 
     # 팀 선택 안 했을 때
     return render_template("Bgraph.html", team_list=team_list, charts={}, analysis={}, warnings={}, last_update=None)
@@ -380,6 +378,5 @@ def refresh():
 
 # ---------- 실행 ----------
 if __name__ == "__main__":
-    import os
     port = int(os.environ.get("PORT", 5055))
     app.run(host="0.0.0.0", port=port, debug=False)
