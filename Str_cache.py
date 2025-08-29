@@ -4,7 +4,43 @@ import requests
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
 
+TEAM_ALIASES = {
+    # SSG
+    "SSG": "SSG", "SSG 랜더스": "SSG", "쓱": "SSG",
+    # KIA
+    "KIA": "KIA", "KIA 타이거즈": "KIA", "기아": "KIA",
+    # LG
+    "LG": "LG", "LG 트윈스": "LG",
+    # 두산
+    "두산": "두산", "두산 베어스": "두산",
+    # 롯데
+    "롯데": "롯데", "롯데 자이언츠": "롯데",
+    # 삼성
+    "삼성": "삼성", "삼성 라이온즈": "삼성",
+    # NC
+    "NC": "NC", "NC 다이노스": "NC",
+    # KT
+    "KT": "KT", "KT 위즈": "KT",
+    # 키움
+    "키움": "키움", "키움 히어로즈": "키움", "넥센": "키움",
+    # 한화
+    "한화": "한화", "한화 이글스": "한화",
+}
 
+def canon_team(name: str) -> str:
+    if name is None:
+        return ""
+    n = str(name).strip()
+    return TEAM_ALIASES.get(n, n)
+
+def canon_df(df: pd.DataFrame, col: str = "팀") -> pd.DataFrame:
+    if col in df.columns:
+        df[col] = df[col].map(canon_team)
+    return df
+
+CAT_SLUG = {"타자": "batting", "투수": "pitching", "수비": "defense", "주루": "running"}
+def cat_slug(x: str) -> str:
+    return CAT_SLUG.get(str(x).strip(), str(x).strip())
 # -----------------------------
 # 경로/캐시 기본설정
 # -----------------------------
@@ -102,19 +138,19 @@ metric_info = {
     "WP_per_G": {"desc": "폭투가 잦아 주자 관리가 불안정합니다."},
     "BK_per_G": {"desc": "보크 빈도가 높아 투구 동작 안정성이 떨어집니다."},
 
-    
-    "FPCT": {"desc": "수비율이 낮아 기본 안정성이 부족합니다."},
-    "E_per_G": {"desc": "실책이 많아 수비 불안이 큽니다."},
-    "PO_per_G": {"desc": "아웃 처리 관여가 적어 수비 개입이 부족합니다."},
-    "A_per_G":  {"desc": "송구·중계 개입이 적어 연결 플레이가 약합니다."},
-    "RF_per_G": {"desc": "수비 관여 범위가 좁아 커버 폭이 제한적입니다."},
-    "DP_per_G": {"desc": "병살 연결이 적어 수비 연계력이 떨어집니다."},
-    "CS_def_per_G": {"desc": "도루 저지가 적어 상대 주루를 막지 못합니다."},
-    "PKO_def_per_G": {"desc": "견제 아웃이 적어 주자 리드를 줄이지 못합니다."},
-    "PB_per_G": {"desc": "포일·폭투가 잦아 포수 안정감이 부족합니다."},
-    "SB_per_G": {"desc": "상대 도루 허용이 많아 억제력이 약합니다."},
-    "CS%": {"desc": "도루 저지율이 낮아 2루 견제가 잘 되지 않습니다."},
 
+    # 수비(강화)
+    "FPCT": {"desc": "수비율이 낮아 기본적인 안정성이 부족합니다."},
+    "E_per_G": {"desc": "실책이 많아 수비에서 실점 위험이 큽니다."},
+    "PO_per_G": {"desc": "자살(포구 관여)이 적어 타구 처리 개입이 부족합니다."},
+    "A_per_G":  {"desc": "보조(Assists)가 적어 송구/중계·연계 개입이 드뭅니다."},
+    "RF_per_G": {"desc": "PO+A 기준 수비 관여가 적어 전체 수비 범위가 좁습니다."},
+    "DP_per_G": {"desc": "병살 전환 빈도가 낮아 수비 연계력이 제한적입니다."},
+    "CS_def_per_G": {"desc": "도루 저지 수가 적어 상대 주루 억제가 부족합니다."},
+    "PKO_def_per_G": {"desc": "견제 아웃이 적어 1루 리드 폭을 줄이지 못합니다."},
+    "PB_per_G": {"desc": "포일/패스트볼이 잦아 공 수비 안정감이 떨어집니다."},
+    "SB_per_G": {"desc": "상대 도루 허용이 많아 배터리 억제력이 부족합니다."},
+    "CS%": {"desc": "도루 저지율이 낮아 2루 견제가 효과적이지 못합니다."},
 
 
     # 주루(강화)
@@ -185,14 +221,13 @@ def score_by_area(df: pd.DataFrame, feature_map: dict) -> pd.DataFrame:
     return scored
 
 
-def get_all_scores(force: bool=False):
+def get_all_scores(force: bool = False):
     """
     반환: (score_hit, score_pitch, score_def, score_run,
            df_hit, df_pitch, df_def, df_run,
            clean_hit, clean_pitch, clean_def, clean_run)
     """
     ensure_dirs()
-
 
     # 캐시 경로
     p_hit  = cache_path("df_hit.csv")
@@ -201,122 +236,134 @@ def get_all_scores(force: bool=False):
     p_pit2 = cache_path("df_pitch2.csv")
     p_def  = cache_path("df_def.csv")
 
+    fresh = all(cache_fresh(p) for p in [p_hit, p_run, p_pit1, p_pit2, p_def]) and not force
 
-    fresh = all(cache_fresh(p) for p in [p_hit, p_run, p_pit1, p_pit2, p_def])
-    if fresh and not force:
-        df_hit  = pd.read_csv(p_hit)
-        df_run  = pd.read_csv(p_run)
-        df_p1   = pd.read_csv(p_pit1)
-        df_p2   = pd.read_csv(p_pit2)
-        df_def  = pd.read_csv(p_def)
+    if fresh:
+        # ---- 캐시 로드 ----
+        df_hit = pd.read_csv(p_hit)
+        df_run = pd.read_csv(p_run)
+        df_p1  = pd.read_csv(p_pit1)   # 병합본(투수)
+        df_p2  = pd.read_csv(p_pit2)   # 동일 구조(백업/호환용)
+        df_def = pd.read_csv(p_def)
+
+        # 팀명 정규화
+        df_hit = canon_df(df_hit, "팀")
+        df_run = canon_df(df_run, "팀")
+        df_p1  = canon_df(df_p1,  "팀")
+        df_def = canon_df(df_def, "팀")
+
     else:
-        # 크롤링
+        # ---- 크롤링 ----
+        # 타자
         df_hit1 = _fetch_html_tables("https://www.koreabaseball.com/Record/Team/Hitter/Basic1.aspx")
         df_hit2 = _fetch_html_tables("https://www.koreabaseball.com/Record/Team/Hitter/Basic2.aspx")
-        df_hit  = pd.merge(df_hit1, df_hit2, on="팀명", how="outer").rename(columns={"팀명":"팀"})
+        df_hit  = pd.merge(df_hit1, df_hit2, on="팀명", how="outer").rename(columns={"팀명": "팀"})
 
+        # 주루
+        df_run  = _fetch_html_tables("https://www.koreabaseball.com/Record/Team/Runner/Basic.aspx").rename(columns={"팀명": "팀"})
 
-        df_run  = _fetch_html_tables("https://www.koreabaseball.com/Record/Team/Runner/Basic.aspx").rename(columns={"팀명":"팀"})
+        # 투수(중복 컬럼 제거 후 병합)
+        _p1 = _fetch_html_tables("https://www.koreabaseball.com/Record/Team/Pitcher/Basic1.aspx")
+        _p2 = _fetch_html_tables("https://www.koreabaseball.com/Record/Team/Pitcher/Basic2.aspx")
+        dup_cols = [c for c in _p2.columns if c in _p1.columns and c != "팀명"]
+        df_pitch_merged = pd.merge(_p1, _p2.drop(columns=dup_cols), on="팀명", how="outer").rename(columns={"팀명": "팀"})
+        df_p1 = df_pitch_merged.copy()
+        df_p2 = df_pitch_merged.copy()
 
+        # 수비
+        df_def = _fetch_html_tables("https://www.koreabaseball.com/Record/Team/Defense/Basic.aspx").rename(columns={"팀명": "팀"})
 
-        df_p1   = _fetch_html_tables("https://www.koreabaseball.com/Record/Team/Pitcher/Basic1.aspx")
-        df_p2   = _fetch_html_tables("https://www.koreabaseball.com/Record/Team/Pitcher/Basic2.aspx")
-        dup_cols = [c for c in df_p2.columns if c in df_p1.columns and c!="팀명"]
-        df_pitch = pd.merge(df_p1, df_p2.drop(columns=dup_cols), on="팀명", how="outer").rename(columns={"팀명":"팀"})
-        df_p1, df_p2 = df_pitch.copy(), df_pitch.copy()
+        # 팀명 정규화
+        df_hit = canon_df(df_hit, "팀")
+        df_run = canon_df(df_run, "팀")
+        df_p1  = canon_df(df_p1,  "팀")
+        df_def = canon_df(df_def, "팀")
 
-
-        df_def  = _fetch_html_tables("https://www.koreabaseball.com/Record/Team/Defense/Basic.aspx").rename(columns={"팀명":"팀"})
-
-
-        # 캐시 저장
+        # 캐시에 저장
         df_hit.to_csv(p_hit, index=False, encoding="utf-8-sig")
         df_run.to_csv(p_run, index=False, encoding="utf-8-sig")
         df_p1.to_csv(p_pit1, index=False, encoding="utf-8-sig")
         df_p2.to_csv(p_pit2, index=False, encoding="utf-8-sig")
         df_def.to_csv(p_def, index=False, encoding="utf-8-sig")
 
-
     # -----------------------------
     # 파생지표/경기당 환산
     # -----------------------------
-    # 타자
+
+    # 타자 per-G
     if "G" in df_hit.columns:
-        _to_numeric(df_hit, ["G","SO","GDP","SAC","SF"])
-        g = df_hit["G"].replace(0,1)
-        for col in ["SO","GDP","SAC","SF"]:
+        _to_numeric(df_hit, ["G", "SO", "GDP", "SAC", "SF"])
+        g = df_hit["G"].replace(0, 1)
+        for col in ["SO", "GDP", "SAC", "SF"]:
             if col in df_hit.columns:
                 df_hit[f"{col}_per_G"] = pd.to_numeric(df_hit[col], errors="coerce").fillna(0) / g
 
-
-    # 투수 (IP decimal + per_G + P/IP)
-    df_pitch = df_p1
+    # 투수: df_pitch는 df_p1을 기준으로
+    df_pitch = df_p1.copy()
     if "IP" in df_pitch.columns:
         def _ip_to_decimal(v):
             try:
-                s=str(v).strip()
-                if not s: return 0.0
-                if ' ' in s:
+                s = str(v).strip()
+                if not s:
+                    return 0.0
+                if " " in s:
                     whole, frac = s.split()
-                    num,den = frac.split('/')
-                    return float(whole) + float(num)/float(den)
+                    num, den = frac.split("/")
+                    return float(whole) + float(num) / float(den)
                 return float(s)
-            except: return 0.0
+            except:
+                return 0.0
         df_pitch["IP"] = df_pitch["IP"].apply(_ip_to_decimal)
 
-
-    _to_numeric(df_pitch, ["G","QS","SO","BB","HLD","SV","BSV","NP","WP","BK","WPCT","ERA","WHIP"])
-    g_p = df_pitch["G"].replace(0,1) if "G" in df_pitch.columns else 1
-    for col, new in [("QS","QS_per_G"), ("SO","SO_p_per_G"), ("BB","BB_p_per_G"),
-                     ("HLD","HLD_per_G"), ("SV","SV_per_G"), ("BSV","BSV_per_G"),
-                     ("NP","NP_per_G"), ("WP","WP_per_G"), ("BK","BK_per_G")]:
+    _to_numeric(df_pitch, ["G", "QS", "SO", "BB", "HLD", "SV", "BSV", "NP", "WP", "BK", "WPCT", "ERA", "WHIP"])
+    g_p = df_pitch["G"].replace(0, 1) if "G" in df_pitch.columns else 1
+    for col, new in [
+        ("QS", "QS_per_G"), ("SO", "SO_p_per_G"), ("BB", "BB_p_per_G"),
+        ("HLD", "HLD_per_G"), ("SV", "SV_per_G"), ("BSV", "BSV_per_G"),
+        ("NP", "NP_per_G"), ("WP", "WP_per_G"), ("BK", "BK_per_G")
+    ]:
         if col in df_pitch.columns:
             df_pitch[new] = pd.to_numeric(df_pitch[col], errors="coerce").fillna(0) / g_p
     if "NP" in df_pitch.columns and "IP" in df_pitch.columns:
         df_pitch["P/IP"] = (pd.to_numeric(df_pitch["NP"], errors="coerce").fillna(0) /
                             df_pitch["IP"].replace(0, pd.NA)).fillna(0)
 
-
     # 수비
-    _to_numeric(df_def, ["G","E","PKO","PO","A","DP","PB","SB","CS","FPCT","CS%"])
-    g_d = df_def["G"].replace(0,1) if "G" in df_def.columns else 1
-    for col in ["E","PKO","PO","A","DP","PB","SB","CS"]:
+    _to_numeric(df_def, ["G", "E", "PKO", "PO", "A", "DP", "PB", "SB", "CS", "FPCT", "CS%"])
+    g_d = df_def["G"].replace(0, 1) if "G" in df_def.columns else 1
+    for col in ["E", "PKO", "PO", "A", "DP", "PB", "SB", "CS"]:
         if col in df_def.columns:
             df_def[f"{col}_per_G"] = pd.to_numeric(df_def[col], errors="coerce").fillna(0) / g_d
-    if {"PO","A"}.issubset(df_def.columns):
+    if {"PO", "A"}.issubset(df_def.columns):
         df_def["RF_per_G"] = (pd.to_numeric(df_def["PO"], errors="coerce").fillna(0) +
-                              pd.to_numeric(df_def["A"],  errors="coerce").fillna(0)) / g_d
+                              pd.to_numeric(df_def["A"], errors="coerce").fillna(0)) / g_d
     else:
         df_def["RF_per_G"] = 0.0
     # 수비/주루 관점 분리
-    df_def["CS_def_per_G"]  = df_def.get("CS_per_G",  0)
+    df_def["CS_def_per_G"]  = df_def.get("CS_per_G", 0)
     df_def["PKO_def_per_G"] = df_def.get("PKO_per_G", 0)
 
-
     # 주루
-    _to_numeric(df_run, ["G","SB","CS","OOB","PKO","SB%"])
-    g_r = df_run["G"].replace(0,1) if "G" in df_run.columns else 1
-    for col in ["SB","CS","OOB","PKO"]:
+    _to_numeric(df_run, ["G", "SB", "CS", "OOB", "PKO", "SB%"])
+    g_r = df_run["G"].replace(0, 1) if "G" in df_run.columns else 1
+    for col in ["SB", "CS", "OOB", "PKO"]:
         if col in df_run.columns:
             df_run[f"{col}_per_G"] = pd.to_numeric(df_run[col], errors="coerce").fillna(0) / g_r
-    df_run["CS_run_per_G"]  = df_run.get("CS_per_G",  0)
+    df_run["CS_run_per_G"]  = df_run.get("CS_per_G", 0)
     df_run["PKO_run_per_G"] = df_run.get("PKO_per_G", 0)
-
 
     # -----------------------------
     # 정제/스코어링
     # -----------------------------
-    clean_hit   = clean_and_extract(df_hit.rename(columns={"팀":"팀"}),   batting_features)
-    clean_pitch = clean_and_extract(df_pitch.rename(columns={"팀":"팀"}), pitching_features)
-    clean_def   = clean_and_extract(df_def.rename(columns={"팀":"팀"}),   defense_features)
-    clean_run   = clean_and_extract(df_run.rename(columns={"팀":"팀"}),   running_features)
-
+    clean_hit   = clean_and_extract(df_hit.rename(columns={"팀": "팀"}),   batting_features)
+    clean_pitch = clean_and_extract(df_pitch.rename(columns={"팀": "팀"}), pitching_features)
+    clean_def   = clean_and_extract(df_def.rename(columns={"팀": "팀"}),   defense_features)
+    clean_run   = clean_and_extract(df_run.rename(columns={"팀": "팀"}),   running_features)
 
     score_hit   = score_by_area(clean_hit,   batting_features)
     score_pitch = score_by_area(clean_pitch, pitching_features)
     score_def   = score_by_area(clean_def,   defense_features)
     score_run   = score_by_area(clean_run,   running_features)
-
 
     return (score_hit, score_pitch, score_def, score_run,
             df_hit, df_pitch, df_def, df_run,
@@ -330,4 +377,3 @@ if __name__ == "__main__":
     with open(cache_path("last_update.json"), "w", encoding="utf-8") as f:
         json.dump({"ts": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())}, f, ensure_ascii=False)
     print("Done.")
-
