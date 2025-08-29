@@ -234,53 +234,53 @@ def warm_up_async(force=False):
     threading.Thread(target=_fetch_and_update_cache, kwargs={"force": force}, daemon=True).start()
 
 # ---------- 렌더링 ----------
+def _team_list_from_disk_cache():
+    """디스크 캐시(static/cache/df_hit.csv)에서 팀 리스트만 추출(초기 기동 대비)."""
+    try:
+        p = os.path.join("static", "cache", "df_hit.csv")
+        if os.path.exists(p):
+            df = pd.read_csv(p)
+            if "팀" in df.columns:
+                return df["팀"].dropna().unique().tolist()
+    except Exception:
+        pass
+    return []
+
 def render_index(payload):
-    # 8-튜플(과거 스텁 등)이 들어와도 12-튜플로 보정
-    if isinstance(payload, (list, tuple)) and len(payload) == 8:
+    """템플릿이 기대하는 12-튜플(스코어4, raw4, clean4)로 강제 정규화 후 렌더링."""
+    # 1) payload 정규화
+    if not isinstance(payload, (list, tuple)):
+        payload = empty_stub_payload()
+    elif len(payload) == 8:
         (score_hit, score_pitch, score_def, score_run,
          df_hit, df_pitch, df_def, df_run) = payload
         clean_hit, clean_pitch, clean_def, clean_run = df_hit, df_pitch, df_def, df_run
         payload = (score_hit, score_pitch, score_def, score_run,
                    df_hit, df_pitch, df_def, df_run,
                    clean_hit, clean_pitch, clean_def, clean_run)
+    elif len(payload) != 12:
+        payload = empty_stub_payload()
 
-    (score_hit, score_pitch, score_def, score_run,
-     df_hit, df_pitch, df_def, df_run,
-     clean_hit, clean_pitch, clean_def, clean_run) = payload
+    # 2) 안전 언패킹
+    try:
+        (score_hit, score_pitch, score_def, score_run,
+         df_hit, df_pitch, df_def, df_run,
+         clean_hit, clean_pitch, clean_def, clean_run) = payload
+    except Exception:
+        (score_hit, score_pitch, score_def, score_run,
+         df_hit, df_pitch, df_def, df_run,
+         clean_hit, clean_pitch, clean_def, clean_run) = empty_stub_payload()
 
-
-    def _team_list_from_disk_cache():
-        try:
-            p = os.path.join("static", "cache", "df_hit.csv")
-            if os.path.exists(p):
-                df = pd.read_csv(p)
-                if "팀" in df.columns:
-                   return df["팀"].dropna().unique().tolist()
-        except Exception:
-            pass
-        return []
-
-def render_index(payload):
-    ...
-    # 캐시/데이터가 아직 없으면 빈 화면
+    # 3) 데이터 없으면 팀 리스트만이라도 표시
     if score_hit is None or (isinstance(score_hit, pd.DataFrame) and score_hit.empty):
-        team_list_fallback = _team_list_from_disk_cache()
         return render_template(
             "Bgraph.html",
-            team_list=team_list_fallback,   # ← 최소한 팀 선택은 가능
+            team_list=_team_list_from_disk_cache(),
             charts={}, analysis={}, warnings={},
             last_update=None
         )
 
-
-    
-    # 캐시/데이터가 아직 없으면 빈 화면
-    if score_hit is None or isinstance(score_hit, pd.DataFrame) and score_hit.empty:
-        return render_template("Bgraph.html",
-                               team_list=[],
-                               charts={}, analysis={}, warnings={},
-                               last_update=None)
-
+    # 4) 정상 렌더링
     team_list = score_hit["팀"].tolist()
     charts, analysis_results = {}, {}
     team = (request.args.get("team") or request.form.get("team_name") or "").strip()
@@ -304,10 +304,7 @@ def render_index(payload):
 
             score_col = str(df.columns[1])
             df_sorted = df.sort_values(by=score_col, ascending=False).reset_index(drop=True)
-            if team in df_sorted.head(3)["팀"].values:
-                compare_label = "전체 평균"
-            else:
-                compare_label = "상위 3팀 평균"
+            compare_label = "전체 평균" if team in df_sorted.head(3)["팀"].values else "상위 3팀 평균"
 
             chart_path = draw_radar_chart_if_needed(
                 df, team, cat, compare_label=compare_label, data_ts=DATA_CACHE["ts"]
@@ -322,58 +319,53 @@ def render_index(payload):
             return "하"
 
         def add_strategy(cat_name, df_score, label, msgs):
-            if df_score is None or df_score.empty or label not in df_score.columns: 
+            if df_score is None or df_score.empty or label not in df_score.columns:
                 return
-            v = float(df_score.loc[df_score["팀"]==team, label].values[0])
+            v = float(df_score.loc[df_score["팀"] == team, label].values[0])
             z = get_zone(v)
             analysis_results["categories"][cat_name]["main"].append(f"· {label} {msgs[z]}")
 
         # 투수 - 불펜 전략
         add_strategy("투수", score_pitch, "불펜 전략", {
-            "상":   "안정적입니다. 리드 상황은 잘 지키고 있으니 필승조(핵심 불펜) 휴식일만 관리하세요.",
-            "중상": "대체로 좋습니다. 좌우 투수 활용을 더 세밀하게 하고, 연속 등판만 줄이면 됩니다.",
-            "중하": "기복이 있습니다. 롱릴리프(긴 이닝 소화)와 브릿지(중간 계투) 역할을 명확히 나누세요.",
-            "하":   "불안합니다. 셋업·마무리 구성을 다시 짜고 경기 후반 운영 방식을 재정비하세요."
+            "상":"안정적입니다. 리드 상황은 잘 지키고 있으니 필승조 휴식일만 관리하세요.",
+            "중상":"대체로 좋습니다. 좌우 투수 활용을 더 세밀하게, 연속 등판만 줄이면 됩니다.",
+            "중하":"기복이 있습니다. 롱릴리프/브릿지 역할을 명확히 나누세요.",
+            "하":"불안합니다. 셋업·마무리 재구성 및 후반 운영 재정비가 필요합니다."
         })
-
         # 타자 - 찬스 대응
         add_strategy("타자", score_hit, "찬스 대응", {
-            "상":   "매우 좋습니다. 클러치 상황과 2스트라이크 대응을 그대로 유지하세요.",
-            "중상": "양호합니다. 빠른 공/변화구 대응 루틴을 조금만 다듬으세요.",
-            "중하": "아쉽습니다. 중심타선에서 진루타 전략(번트·히트앤런)을 늘리세요.",
-            "하":   "취약합니다. 타순 재배열과 초구 공략, 존 통제로 선구를 강화하세요."
+            "상":"매우 좋습니다. 클러치/2스트라이크 대응을 유지하세요.",
+            "중상":"양호합니다. 구종 대응 루틴을 조금만 다듬으세요.",
+            "중하":"아쉽습니다. 진루타 전략(번트·히트앤런)을 늘리세요.",
+            "하":"취약합니다. 타순 재배열 및 초구 공략, 존 통제를 강화하세요."
         })
-
         # 수비 - 관여/범위
         add_strategy("수비", score_def, "수비 관여/범위", {
-            "상":   "범위가 넓습니다. 현재 포지셔닝을 유지하세요.",
-            "중상": "무난합니다. 중계·백업 동선을 반복 훈련해 안정성을 높이세요.",
-            "중하": "다소 좁습니다. 외야 전진 수비와 내야 범위 훈련을 늘리세요.",
-            "하":   "제한적입니다. 타구 분포에 맞춘 수비 위치와 팀 간 소통을 강화하세요."
+            "상":"범위가 넓습니다. 현재 포지셔닝을 유지하세요.",
+            "중상":"무난합니다. 중계·백업 동선을 반복 훈련하세요.",
+            "중하":"다소 좁습니다. 외야 전진/내야 범위 훈련을 늘리세요.",
+            "하":"제한적입니다. 타구 분포 기반 위치/소통을 강화하세요."
         })
-
         # 수비 - 도루 억제
         add_strategy("수비", score_def, "도루 억제", {
-            "상":   "잘 억제합니다. 지금 수준을 유지하세요.",
-            "중상": "대체로 양호합니다. 투수 견제 동작을 조금 더 다양화하세요.",
-            "중하": "허용이 늘었습니다. 포수 송구 정확도와 1루 견제를 강화하세요.",
-            "하":   "취약합니다. 투수 동작과 포수 송구 모두 전면 재정비가 필요합니다."
+            "상":"잘 억제합니다. 지금 수준을 유지하세요.",
+            "중상":"양호합니다. 투수 견제 동작을 더 다양화하세요.",
+            "중하":"허용이 늘었습니다. 포수 송구와 1루 견제를 강화하세요.",
+            "하":"취약합니다. 투수 동작/포수 송구 전면 재정비가 필요합니다."
         })
-
         # 수비 - 안정성
         add_strategy("수비", score_def, "수비 안정성", {
-            "상":   "안정적입니다. 강한 타구 대응과 송구 속도를 유지하세요.",
-            "중상": "대체로 좋습니다. 실책 유형을 분석해 맞춤 훈련하세요.",
-            "중하": "흔들립니다. 송구 정확도와 기본 동작을 보완하세요.",
-            "하":   "불안정합니다. 기본기 루틴을 재학습해 쉬운 플레이 성공률부터 회복하세요."
+            "상":"안정적입니다. 강한 타구 대응/송구 속도를 유지하세요.",
+            "중상":"좋습니다. 실책 유형을 분석해 맞춤 훈련하세요.",
+            "중하":"흔들립니다. 송구 정확도와 기본 동작을 보완하세요.",
+            "하":"불안정합니다. 기본기 루틴을 재학습해 성공률부터 회복하세요."
         })
-
         # 주루 - 도루 전략 판단
         add_strategy("주루", score_run, "도루 전략 판단", {
-            "상":   "효율적입니다. 도루 시도를 적극적으로 이어가세요.",
-            "중상": "무난합니다. 좌투수 상대에서 도루를 조금 더 활용하세요.",
-            "중하": "아쉽습니다. 도루 성공률이 낮아 리드 폭을 줄이고 히트앤런 같은 대체 작전을 고려하세요.",
-            "하":   "취약합니다. 도루가 잘 통하지 않아 비중을 줄이고 대주자 카드를 상황 한정으로 활용하세요."
+            "상":"효율적입니다. 도루 시도를 적극적으로 이어가세요.",
+            "중상":"무난합니다. 좌투수 상대에서 도루를 조금 더 활용하세요.",
+            "중하":"아쉽습니다. 성공률 낮으면 리드 폭 축소·대체 작전 고려하세요.",
+            "하":"취약합니다. 도루 비중을 줄이고 대주자 카드를 상황 한정으로 쓰세요."
         })
 
         # ------- 세부 진단 -------
@@ -381,7 +373,6 @@ def render_index(payload):
             out=[]
             if raw_df is None or raw_df.empty or scaled_df is None or scaled_df.empty:
                 return out
-
             def zone_from_quantile(val, qs, inverse=False):
                 q1,q2,q3 = qs
                 if not inverse:
@@ -468,12 +459,12 @@ def render_index(payload):
 def index():
     payload = read_payload_from_cache()
     if payload is None:
-        # ➊ 동기 한 번 시도 (빠른 실패)
+        # 1회 동기 수집(빠른 실패)
         ok = _fetch_and_update_cache(force=False, attempts=1, base_sleep=0.5)
         if ok:
             payload = read_payload_from_cache()
         else:
-            # ➋ 실패하면 비동기 워밍 + 스텁 반환
+            # 실패 시 비동기 워밍 + 스텁
             warm_up_async(force=False)
             payload = empty_stub_payload()
     return render_index(payload)
@@ -484,7 +475,6 @@ def healthz():
 
 @app.route("/refresh")
 def refresh():
-    # 강제 최신화(네트워크). 호출은 관리자/수동으로만.
     ok = _fetch_and_update_cache(force=True)
     if not ok:
         return ("FETCH FAILED", 503)
