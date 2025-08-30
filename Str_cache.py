@@ -1,379 +1,330 @@
 # Str_cache.py
-import os, io, time, json
-import requests
+# 안정적 시드+증분 캐시 모듈 (드롭다운/초기 UI 안전화)
+# - 시드 경로: ./static/seed/*.csv
+# - 캐시 경로: ./cache/*.csv
+# - 메타: ./cache/manifest.json
+
+from __future__ import annotations
+import os, json, tempfile
+from pathlib import Path
+from datetime import date, datetime, timedelta
+from typing import Dict, List, Optional
+
 import pandas as pd
-from sklearn.preprocessing import MinMaxScaler
 
-TEAM_ALIASES = {
-    # SSG
-    "SSG": "SSG", "SSG 랜더스": "SSG", "쓱": "SSG",
-    # KIA
-    "KIA": "KIA", "KIA 타이거즈": "KIA", "기아": "KIA",
-    # LG
-    "LG": "LG", "LG 트윈스": "LG",
-    # 두산
-    "두산": "두산", "두산 베어스": "두산",
-    # 롯데
-    "롯데": "롯데", "롯데 자이언츠": "롯데",
-    # 삼성
-    "삼성": "삼성", "삼성 라이온즈": "삼성",
-    # NC
-    "NC": "NC", "NC 다이노스": "NC",
-    # KT
-    "KT": "KT", "KT 위즈": "KT",
-    # 키움
-    "키움": "키움", "키움 히어로즈": "키움", "넥센": "키움",
-    # 한화
-    "한화": "한화", "한화 이글스": "한화",
+# =========================
+# 경로/상수
+# =========================
+BASE_DIR = Path(__file__).resolve().parent
+CACHE_DIR = BASE_DIR / "cache"
+SEED_DIR  = BASE_DIR / "static" / "seed"
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+# 캐시 파일 스키마 버전 (컬럼/형식 바뀌면 반드시 갱신)
+SCHEMA_VERSION = "2025-08-30-v1"
+
+# 드롭다운 최소 보장용
+TEAM_LIST_FALLBACK = ["LG","KT","KIA","SSG","두산","롯데","삼성","NC","키움","한화"]
+
+# 캐시 대상(파일명 -> 필수 컬럼)
+REQUIRED: Dict[str, List[str]] = {
+    "df_hit.csv":    ["team","date","H","HR","AB"],
+    "df_run.csv":    ["team","date","SB","CS"],
+    "df_pitch1.csv": ["team","date","ERA","IP","WHIP"],
+    "df_pitch2.csv": ["team","date","QS","SV","HLD"],
+    "df_def.csv":    ["team","date","E","FPCT","A"],
 }
 
-def canon_team(name: str) -> str:
-    if name is None:
-        return ""
-    n = str(name).strip()
-    return TEAM_ALIASES.get(n, n)
-
-def canon_df(df: pd.DataFrame, col: str = "팀") -> pd.DataFrame:
-    if col in df.columns:
-        df[col] = df[col].map(canon_team)
-    return df
-
-CAT_SLUG = {"타자": "batting", "투수": "pitching", "수비": "defense", "주루": "running"}
-def cat_slug(x: str) -> str:
-    return CAT_SLUG.get(str(x).strip(), str(x).strip())
-# -----------------------------
-# 경로/캐시 기본설정
-# -----------------------------
-BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
-STATIC_DIR = os.path.join(BASE_DIR, "static")
-OUT_DIR    = os.path.join(STATIC_DIR, "output")
-CACHE_DIR  = os.path.join(STATIC_DIR, "cache")
-CACHE_TTL_HOURS = 6  # 캐시 유효시간
+MANIFEST = CACHE_DIR / "manifest.json"
 
 
-def ensure_dirs():
-    os.makedirs(OUT_DIR, exist_ok=True)
-    os.makedirs(CACHE_DIR, exist_ok=True)
-
-
-def cache_path(name: str) -> str:
-    return os.path.join(CACHE_DIR, name)
-
-
-def cache_fresh(path: str) -> bool:
-    if not os.path.exists(path):
-        return False
-    mtime = os.path.getmtime(path)
-    return (time.time() - mtime) < (CACHE_TTL_HOURS * 3600)
-
-# -----------------------------
-# 피처맵 / 역지표 / 설명
-# -----------------------------
-batting_features = {
-    "공격력 전반": ["OPS", "OBP", "SLG"],
-    "찬스 대응": ["RISP"],
-    "작전 적합도": ["SO_per_G", "GDP_per_G", "SAC_per_G", "SF_per_G"],
-}
-
-
-pitching_features = {
-    "선발 운용": ["ERA", "QS_per_G", "IP_per_G", "WHIP", "SO_p_per_G", "BB_p_per_G", "P/IP"],
-    "불펜 전략": ["HLD_per_G", "SV_per_G", "BSV_per_G", "WPCT"],
-    "교체 운용": ["NP_per_G", "WP_per_G", "BK_per_G"],
-}
-
-
-# ✅ 수비/주루에서 같은 이름의 지표가 ‘의미’가 달라서 분리
-defense_features = {
-    "수비 안정성": ["FPCT", "E_per_G"],
-    "수비 관여/범위": ["RF_per_G", "PO_per_G", "A_per_G"],
-    "연계 플레이": ["DP_per_G"],
-    "도루 억제": ["CS_def_per_G", "CS%", "PB_per_G", "PKO_def_per_G", "SB_per_G"],
-}
-
-
-running_features = {
-    "도루 전략 판단": ["SB", "SB%"],
-    "위험 주루 억제": ["CS_run_per_G", "PKO_run_per_G"],
-    "주루 감각 평가": ["OOB_per_G"],
-}
-
-
-# ✅ 역지표(높을수록 나쁨)
-inverse_metrics = {
-    # 투수
-    "ERA", "WHIP", "BSV_per_G", "BB_p_per_G", "P/IP", "WP_per_G", "BK_per_G",
-    # 타격
-    "SO_per_G", "GDP_per_G",
-    # 수비
-    "E_per_G", "PB_per_G", "SB_per_G",   # (CS_def_per_G / PKO_def_per_G 는 정상지표 → 제외)
-    # 주루(주루팀 관점에서 ‘잡힘/견제사’는 나쁨)
-    "OOB_per_G", "CS_run_per_G", "PKO_run_per_G",
-}
-
-
-# 설명(없으면 기본 문구)
-metric_info = {
-    # 타격
-    "OPS": {"desc": "종합적인 공격 생산력이 부족한 것으로 판단됩니다."},
-    "SLG": {"desc": "장타력이 부족하여 큰 점수를 내기 어렵습니다."},
-    "RISP": {"desc": "득점권 해결 능력이 떨어집니다."},
-    "SO_per_G": {"desc": "삼진이 많아 공격 흐름이 자주 끊깁니다."},
-    "GDP_per_G": {"desc": "병살타가 많아 공격 흐름이 단절됩니다."},
-    "SAC_per_G": {"desc": "희생번트 활용도가 낮습니다."},
-    "SF_per_G": {"desc": "희생플라이로 주자 진루가 부족합니다."},
-    "OBP": {"desc": "출루율이 낮아 타선 연결이 매끄럽지 않습니다."},
-
-
-    # 투수
-    "WHIP": {"desc": "이닝당 출루 허용이 많아 위기 노출이 잦습니다."},
-    "HLD_per_G": {"desc": "불펜이 약해 리드를 지키지 못합니다."},
-    "ERA": {"desc": "실점 억제가 잘 되지 않습니다."},
-    "QS_per_G": {"desc": "선발 이닝 소화가 부족합니다."},
-    "P/IP": {"desc": "투구 효율이 낮아 교체가 잦습니다."},
-    "IP_per_G": {"desc": "선발 이닝 소화가 부족해 불펜 부담이 커집니다."},
-    "SO_p_per_G": {"desc": "삼진 생산이 부족해 위기에서 탈출하기 어렵습니다."},
-    "BB_p_per_G": {"desc": "볼넷 허용이 많아 불필요한 주자 관리가 발생합니다."},
-    "NP_per_G": {"desc": "경기당 투구 수가 과도해 효율적이지 못합니다."},
-    "WP_per_G": {"desc": "폭투가 잦아 주자 관리가 불안정합니다."},
-    "BK_per_G": {"desc": "보크 빈도가 높아 투구 동작 안정성이 떨어집니다."},
-
-    
-    "FPCT": {"desc": "수비율이 낮아 기본 안정성이 부족합니다."},
-    "E_per_G": {"desc": "실책이 많아 수비 불안이 큽니다."},
-    "PO_per_G": {"desc": "아웃 처리 관여가 적어 수비 개입이 부족합니다."},
-    "A_per_G":  {"desc": "송구·중계 개입이 적어 연결 플레이가 약합니다."},
-    "RF_per_G": {"desc": "수비 관여 범위가 좁아 커버 폭이 제한적입니다."},
-    "DP_per_G": {"desc": "병살 연결이 적어 수비 연계력이 떨어집니다."},
-    "CS_def_per_G": {"desc": "도루 저지가 적어 상대 주루를 막지 못합니다."},
-    "PKO_def_per_G": {"desc": "견제 아웃이 적어 주자 리드를 줄이지 못합니다."},
-    "PB_per_G": {"desc": "포일·폭투가 잦아 포수 안정감이 부족합니다."},
-    "SB_per_G": {"desc": "상대 도루 허용이 많아 억제력이 약합니다."},
-    "CS%": {"desc": "도루 저지율이 낮아 2루 견제가 잘 되지 않습니다."},
-
-
-
-    # 주루(강화)
-    "SB": {"desc": "도루 시도가 많지만 효율성 점검이 필요합니다."},
-    "SB%": {"desc": "도루 성공률이 낮아 작전 효율이 떨어집니다."},
-    "OOB_per_G": {"desc": "주루사/무리한 플레이로 아웃이 많습니다."},
-    "CS_run_per_G": {"desc": "주루 과정에서 잡히는 빈도가 높아 리스크 관리가 부족합니다."},
-    "PKO_run_per_G": {"desc": "견제사 빈도가 높아 리드·스타트 타이밍 조정이 필요합니다."},
-}
-
-
-# -----------------------------
+# =========================
 # 유틸
-# -----------------------------
-def _fetch_html_tables(url: str) -> pd.DataFrame:
-    """requests + read_html"""
-    headers = {
-        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                       "AppleWebKit/537.36 (KHTML, like Gecko) "
-                       "Chrome/122.0.0.0 Safari/537.36"),
-        "Referer": "https://www.koreabaseball.com/",
-        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8",
+# =========================
+def _atomic_write_csv(path: Path, df: pd.DataFrame):
+    """임시 파일에 저장 후 교체로 부분 손상 방지"""
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".csv", dir=str(CACHE_DIR)) as tmp:
+        df.to_csv(tmp.name, index=False, encoding="utf-8")
+        tmp.flush()
+        os.replace(tmp.name, path)
+
+def _normalize_columns(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
+    for c in columns:
+        if c not in df.columns:
+            df[c] = pd.NA
+    df = df[columns]
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"]).dt.date
+    if "team" in df.columns:
+        # 팀 문자열 자잘한 공백/널 방지
+        df["team"] = df["team"].astype(str).str.strip()
+    return df
+
+def _load_or_seed(filename: str, columns: List[str]) -> pd.DataFrame:
+    """캐시→시드→빈헤더 순으로 로드하고 캐시에 보장 저장"""
+    cache_path = CACHE_DIR / filename
+    # 1) 캐시 존재 시
+    if cache_path.exists():
+        try:
+            df = pd.read_csv(cache_path)
+            df = _normalize_columns(df, columns)
+            return df
+        except Exception:
+            pass  # 손상 시 아래로 폴백
+
+    # 2) 시드 존재 시
+    seed_path = SEED_DIR / filename
+    if seed_path.exists():
+        try:
+            df = pd.read_csv(seed_path)
+            df = _normalize_columns(df, columns)
+            _atomic_write_csv(cache_path, df)
+            return df
+        except Exception:
+            pass
+
+    # 3) 빈 헤더
+    df = pd.DataFrame(columns=columns)
+    _atomic_write_csv(cache_path, df)
+    return df
+
+def _ensure_manifest() -> dict:
+    if MANIFEST.exists():
+        try:
+            meta = json.loads(MANIFEST.read_text(encoding="utf-8"))
+            if meta.get("schema_version") != SCHEMA_VERSION:
+                raise ValueError("schema changed")
+            # 필수 키 보정
+            if "high_watermark" not in meta:
+                meta["high_watermark"] = {k: None for k in REQUIRED}
+            for k in REQUIRED:
+                meta["high_watermark"].setdefault(k, None)
+            return meta
+        except Exception:
+            pass
+    meta = {
+        "schema_version": SCHEMA_VERSION,
+        "last_updated": None,
+        "high_watermark": {k: None for k in REQUIRED},  # 파일별 마지막 날짜(YYYY-MM-DD)
     }
-    r = requests.get(url, headers=headers, timeout=15)
-    r.raise_for_status()
-    buf = io.StringIO(r.text)
-    tables = pd.read_html(buf, flavor="lxml")
-    if not tables:
-        raise ValueError("No table found in page")
-    return tables[0]
-def _to_numeric(df: pd.DataFrame, cols):
-    for c in cols:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c].astype(str).str.replace('%','', regex=False),
-                                  errors="coerce").fillna(0)
+    MANIFEST.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    return meta
 
+def _save_manifest(meta: dict):
+    MANIFEST.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
-# -----------------------------
-# 메인 파이프라인
-# -----------------------------
-def clean_and_extract(df: pd.DataFrame, feature_map: dict) -> pd.DataFrame:
-    df = df.copy()
-    for cols in feature_map.values():
-        for col in cols:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col].astype(str).str.replace('%','', regex=False),
-                                        errors="coerce").fillna(0)
-            else:
-                df[col] = 0.0
+def _drop_dupes_by_team_date(df: pd.DataFrame) -> pd.DataFrame:
+    subset = [c for c in ["team","date"] if c in df.columns]
+    if subset:
+        df = df.drop_duplicates(subset=subset, keep="last")
+    if "date" in df.columns:
+        df = df.sort_values("date")
     return df
 
 
-def score_by_area(df: pd.DataFrame, feature_map: dict) -> pd.DataFrame:
-    scored = pd.DataFrame({"팀": df["팀"]})
-    scaler = MinMaxScaler()
-    for area, cols in feature_map.items():
-        valid = [c for c in cols if c in df.columns]
-        if not valid:
-            continue
-        area_scores = pd.DataFrame(index=df.index)
-        for col in valid:
-            series = df[col].copy()
-            if col in inverse_metrics:   # 역지표 반전
-                series = series.max() - series
-            scaled = scaler.fit_transform(series.values.reshape(-1,1)).flatten()
-            area_scores[col] = scaled
-        scored[area] = area_scores.mean(axis=1)
-    return scored
+# =========================
+# 공개 API (부트/로드/옵션)
+# =========================
+_cache_frames: Dict[str, pd.DataFrame] = {}
+_manifest: Optional[dict] = None
+
+def bootstrap_cache() -> None:
+    """앱 시작 시 1회 호출: 캐시 프레임/매니페스트 보장"""
+    global _cache_frames, _manifest
+    _cache_frames = {name: _load_or_seed(name, cols) for name, cols in REQUIRED.items()}
+    _manifest = _ensure_manifest()
+
+def load_cache_frames() -> Dict[str, pd.DataFrame]:
+    """현재 메모리 상의 캐시 프레임 반환 (필요 시 bootstrap_cache 먼저 호출)"""
+    if not _cache_frames:
+        bootstrap_cache()
+    return _cache_frames
+
+def get_team_options() -> List[str]:
+    """드롭다운 팀 목록(항상 값 보장)"""
+    frames = load_cache_frames()
+    for key in ["df_hit.csv", "df_pitch1.csv", "df_def.csv", "df_pitch2.csv", "df_run.csv"]:
+        df = frames.get(key)
+        if df is not None and "team" in df and df["team"].notna().any():
+            uniq = sorted([t for t in df["team"].dropna().unique().tolist() if str(t).strip()])
+            if uniq:
+                return uniq
+    return TEAM_LIST_FALLBACK
 
 
-def get_all_scores(force: bool = False):
+# =========================
+# 증분 갱신
+# =========================
+class CacheScraper:
     """
-    반환: (score_hit, score_pitch, score_def, score_run,
-           df_hit, df_pitch, df_def, df_run,
-           clean_hit, clean_pitch, clean_def, clean_run)
+    프로젝트 내 기존 크롤러를 얇게 감싼 인터페이스.
+    반드시 아래 메서드를 구현하여 주입하세요.
+
+    def fetch_between(self, start: date, end: date) -> Dict[str, pd.DataFrame]:
+        # 반환: 파일명 -> 해당 구간 신규 데이터프레임
+        # 예: {
+        #   "df_hit.csv": pd.DataFrame([...]),
+        #   "df_pitch1.csv": pd.DataFrame([...]),
+        #   ...
+        # }
+        ...
     """
-    ensure_dirs()
-
-    # 캐시 경로
-    p_hit  = cache_path("df_hit.csv")
-    p_run  = cache_path("df_run.csv")
-    p_pit1 = cache_path("df_pitch1.csv")
-    p_pit2 = cache_path("df_pitch2.csv")
-    p_def  = cache_path("df_def.csv")
-
-    fresh = all(cache_fresh(p) for p in [p_hit, p_run, p_pit1, p_pit2, p_def]) and not force
-
-    if fresh:
-        # ---- 캐시 로드 ----
-        df_hit = pd.read_csv(p_hit)
-        df_run = pd.read_csv(p_run)
-        df_p1  = pd.read_csv(p_pit1)   # 병합본(투수)
-        df_p2  = pd.read_csv(p_pit2)   # 동일 구조(백업/호환용)
-        df_def = pd.read_csv(p_def)
-
-        # 팀명 정규화
-        df_hit = canon_df(df_hit, "팀")
-        df_run = canon_df(df_run, "팀")
-        df_p1  = canon_df(df_p1,  "팀")
-        df_def = canon_df(df_def, "팀")
-
-    else:
-        # ---- 크롤링 ----
-        # 타자
-        df_hit1 = _fetch_html_tables("https://www.koreabaseball.com/Record/Team/Hitter/Basic1.aspx")
-        df_hit2 = _fetch_html_tables("https://www.koreabaseball.com/Record/Team/Hitter/Basic2.aspx")
-        df_hit  = pd.merge(df_hit1, df_hit2, on="팀명", how="outer").rename(columns={"팀명": "팀"})
-
-        # 주루
-        df_run  = _fetch_html_tables("https://www.koreabaseball.com/Record/Team/Runner/Basic.aspx").rename(columns={"팀명": "팀"})
-
-        # 투수(중복 컬럼 제거 후 병합)
-        _p1 = _fetch_html_tables("https://www.koreabaseball.com/Record/Team/Pitcher/Basic1.aspx")
-        _p2 = _fetch_html_tables("https://www.koreabaseball.com/Record/Team/Pitcher/Basic2.aspx")
-        dup_cols = [c for c in _p2.columns if c in _p1.columns and c != "팀명"]
-        df_pitch_merged = pd.merge(_p1, _p2.drop(columns=dup_cols), on="팀명", how="outer").rename(columns={"팀명": "팀"})
-        df_p1 = df_pitch_merged.copy()
-        df_p2 = df_pitch_merged.copy()
-
-        # 수비
-        df_def = _fetch_html_tables("https://www.koreabaseball.com/Record/Team/Defense/Basic.aspx").rename(columns={"팀명": "팀"})
-
-        # 팀명 정규화
-        df_hit = canon_df(df_hit, "팀")
-        df_run = canon_df(df_run, "팀")
-        df_p1  = canon_df(df_p1,  "팀")
-        df_def = canon_df(df_def, "팀")
-
-        # 캐시에 저장
-        df_hit.to_csv(p_hit, index=False, encoding="utf-8-sig")
-        df_run.to_csv(p_run, index=False, encoding="utf-8-sig")
-        df_p1.to_csv(p_pit1, index=False, encoding="utf-8-sig")
-        df_p2.to_csv(p_pit2, index=False, encoding="utf-8-sig")
-        df_def.to_csv(p_def, index=False, encoding="utf-8-sig")
-
-    # -----------------------------
-    # 파생지표/경기당 환산
-    # -----------------------------
-
-    # 타자 per-G
-    if "G" in df_hit.columns:
-        _to_numeric(df_hit, ["G", "SO", "GDP", "SAC", "SF"])
-        g = df_hit["G"].replace(0, 1)
-        for col in ["SO", "GDP", "SAC", "SF"]:
-            if col in df_hit.columns:
-                df_hit[f"{col}_per_G"] = pd.to_numeric(df_hit[col], errors="coerce").fillna(0) / g
-
-    # 투수: df_pitch는 df_p1을 기준으로
-    df_pitch = df_p1.copy()
-    if "IP" in df_pitch.columns:
-        def _ip_to_decimal(v):
-            try:
-                s = str(v).strip()
-                if not s:
-                    return 0.0
-                if " " in s:
-                    whole, frac = s.split()
-                    num, den = frac.split("/")
-                    return float(whole) + float(num) / float(den)
-                return float(s)
-            except:
-                return 0.0
-        df_pitch["IP"] = df_pitch["IP"].apply(_ip_to_decimal)
-
-    _to_numeric(df_pitch, ["G", "QS", "SO", "BB", "HLD", "SV", "BSV", "NP", "WP", "BK", "WPCT", "ERA", "WHIP"])
-    g_p = df_pitch["G"].replace(0, 1) if "G" in df_pitch.columns else 1
-    for col, new in [
-        ("QS", "QS_per_G"), ("SO", "SO_p_per_G"), ("BB", "BB_p_per_G"),
-        ("HLD", "HLD_per_G"), ("SV", "SV_per_G"), ("BSV", "BSV_per_G"),
-        ("NP", "NP_per_G"), ("WP", "WP_per_G"), ("BK", "BK_per_G")
-    ]:
-        if col in df_pitch.columns:
-            df_pitch[new] = pd.to_numeric(df_pitch[col], errors="coerce").fillna(0) / g_p
-    if "NP" in df_pitch.columns and "IP" in df_pitch.columns:
-        df_pitch["P/IP"] = (pd.to_numeric(df_pitch["NP"], errors="coerce").fillna(0) /
-                            df_pitch["IP"].replace(0, pd.NA)).fillna(0)
-
-    # 수비
-    _to_numeric(df_def, ["G", "E", "PKO", "PO", "A", "DP", "PB", "SB", "CS", "FPCT", "CS%"])
-    g_d = df_def["G"].replace(0, 1) if "G" in df_def.columns else 1
-    for col in ["E", "PKO", "PO", "A", "DP", "PB", "SB", "CS"]:
-        if col in df_def.columns:
-            df_def[f"{col}_per_G"] = pd.to_numeric(df_def[col], errors="coerce").fillna(0) / g_d
-    if {"PO", "A"}.issubset(df_def.columns):
-        df_def["RF_per_G"] = (pd.to_numeric(df_def["PO"], errors="coerce").fillna(0) +
-                              pd.to_numeric(df_def["A"], errors="coerce").fillna(0)) / g_d
-    else:
-        df_def["RF_per_G"] = 0.0
-    # 수비/주루 관점 분리
-    df_def["CS_def_per_G"]  = df_def.get("CS_per_G", 0)
-    df_def["PKO_def_per_G"] = df_def.get("PKO_per_G", 0)
-
-    # 주루
-    _to_numeric(df_run, ["G", "SB", "CS", "OOB", "PKO", "SB%"])
-    g_r = df_run["G"].replace(0, 1) if "G" in df_run.columns else 1
-    for col in ["SB", "CS", "OOB", "PKO"]:
-        if col in df_run.columns:
-            df_run[f"{col}_per_G"] = pd.to_numeric(df_run[col], errors="coerce").fillna(0) / g_r
-    df_run["CS_run_per_G"]  = df_run.get("CS_per_G", 0)
-    df_run["PKO_run_per_G"] = df_run.get("PKO_per_G", 0)
-
-    # -----------------------------
-    # 정제/스코어링
-    # -----------------------------
-    clean_hit   = clean_and_extract(df_hit.rename(columns={"팀": "팀"}),   batting_features)
-    clean_pitch = clean_and_extract(df_pitch.rename(columns={"팀": "팀"}), pitching_features)
-    clean_def   = clean_and_extract(df_def.rename(columns={"팀": "팀"}),   defense_features)
-    clean_run   = clean_and_extract(df_run.rename(columns={"팀": "팀"}),   running_features)
-
-    score_hit   = score_by_area(clean_hit,   batting_features)
-    score_pitch = score_by_area(clean_pitch, pitching_features)
-    score_def   = score_by_area(clean_def,   defense_features)
-    score_run   = score_by_area(clean_run,   running_features)
-
-    return (score_hit, score_pitch, score_def, score_run,
-            df_hit, df_pitch, df_def, df_run,
-            clean_hit, clean_pitch, clean_def, clean_run)
+    def fetch_between(self, start: date, end: date) -> Dict[str, pd.DataFrame]:
+        raise NotImplementedError
 
 
+def refresh_cache_incremental(days_back: int = 3, scraper: Optional[CacheScraper] = None) -> dict:
+    """
+    증분 갱신 실행:
+    - 파일별 HWM(마지막 날짜)+1 ~ 오늘 사이만 수집/병합
+    - 중복 제거, 정렬, 아토믹 저장
+    - manifest 갱신
+    반환: {"ok": bool, "last_updated": str, "hwm": dict}
+    """
+    global _cache_frames, _manifest
+    if not _cache_frames or _manifest is None:
+        bootstrap_cache()
+
+    if scraper is None:
+        # 사용자가 주입 안 했으면 no-op 갱신
+        return {
+            "ok": False,
+            "last_updated": _manifest.get("last_updated"),
+            "hwm": _manifest.get("high_watermark"),
+            "msg": "scraper가 주입되지 않아 갱신을 수행하지 않았습니다.",
+        }
+
+    end = date.today()
+    default_start = end - timedelta(days=days_back)
+
+    # 파일별 갱신 필요 구간 계산
+    need_update = {}
+    for fname in REQUIRED:
+        hwm = _manifest["high_watermark"].get(fname)
+        start = default_start if hwm is None else max(default_start, pd.to_datetime(hwm).date() + timedelta(days=1))
+        if start <= end:
+            need_update[fname] = (start, end)
+
+    if not need_update:
+        return {
+            "ok": True,
+            "last_updated": _manifest.get("last_updated"),
+            "hwm": _manifest.get("high_watermark"),
+            "msg": "이미 최신 상태입니다.",
+        }
+
+    # 원천 수집 (최소 구간으로 한 번 호출; 내부에서 파일별 라우팅 권장)
+    min_start = min(s for s, _ in need_update.values())
+    fetched = scraper.fetch_between(min_start, end) or {}
+
+    # 파일별 병합/저장/HWM 갱신
+    for fname, columns in REQUIRED.items():
+        # 신규 조각
+        newdf = fetched.get(fname, pd.DataFrame(columns=columns))
+        newdf = _normalize_columns(newdf, columns)
+
+        # 현재 캐시
+        cur = _cache_frames.get(fname, pd.DataFrame(columns=columns))
+        cur = _normalize_columns(cur, columns)
+
+        merged = pd.concat([cur, newdf], ignore_index=True)
+        merged = _drop_dupes_by_team_date(merged)
+        _atomic_write_csv(CACHE_DIR / fname, merged)
+        _cache_frames[fname] = merged
+
+        # HWM 갱신
+        if "date" in merged.columns and len(merged):
+            _manifest["high_watermark"][fname] = str(max(merged["date"]))
+
+    _manifest["last_updated"] = datetime.now().isoformat(timespec="seconds")
+    _save_manifest(_manifest)
+
+    return {
+        "ok": True,
+        "last_updated": _manifest["last_updated"],
+        "hwm": _manifest["high_watermark"],
+    }
+
+
+# =========================
+# 통합형 헬퍼 (기존 코드와의 연결)
+# =========================
+def get_cached_df(name: str) -> pd.DataFrame:
+    """캐시된 특정 DF 바로 가져오기"""
+    frames = load_cache_frames()
+    return frames.get(name, pd.DataFrame(columns=REQUIRED.get(name, [])))
+
+def get_df_hit() -> pd.DataFrame:
+    return get_cached_df("df_hit.csv")
+
+def get_df_pitch1() -> pd.DataFrame:
+    return get_cached_df("df_pitch1.csv")
+
+def get_df_pitch2() -> pd.DataFrame:
+    return get_cached_df("df_pitch2.csv")
+
+def get_df_def() -> pd.DataFrame:
+    return get_cached_df("df_def.csv")
+
+def get_df_run() -> pd.DataFrame:
+    return get_cached_df("df_run.csv")
+
+
+# =========================
+# 예시: 기존 크롤러 연결 가이드
+# =========================
+# 사용 중인 크롤링 함수가 아래처럼 있다면:
+#   - fetch_hit_stats(start, end) -> pd.DataFrame(columns=["team","date","H","HR","AB", ...])
+#   - fetch_pitch_stats1(start, end) -> pd.DataFrame(columns=["team","date","ERA","IP","WHIP", ...])
+#   - fetch_pitch_stats2(start, end) -> pd.DataFrame(columns=["team","date","QS","SV","HLD", ...])
+#   - fetch_def_stats(start, end) -> pd.DataFrame(columns=["team","date","E","FPCT","A", ...])
+#   - fetch_run_stats(start, end) -> pd.DataFrame(columns=["team","date","SB","CS", ...])
+#
+# 아래 클래스를 프로젝트에 맞춰 구현하고, refresh_cache_incremental(days_back, scraper=YourScraper())로 호출하세요.
+
+class YourProjectScraper(CacheScraper):
+    def __init__(self):
+        # 필요 시 세션/헤더/쿠키 준비
+        pass
+
+    def fetch_between(self, start: date, end: date) -> Dict[str, pd.DataFrame]:
+        # TODO: 아래를 실제 함수로 교체
+        # from your_module import fetch_hit_stats, fetch_pitch_stats1, fetch_pitch_stats2, fetch_def_stats, fetch_run_stats
+        def _empty(cols): return pd.DataFrame(columns=cols)
+
+        result: Dict[str, pd.DataFrame] = {}
+        try:
+            # 예시: 존재하는 함수로 바꿔 연결
+            # result["df_hit.csv"]    = fetch_hit_stats(start, end)
+            # result["df_pitch1.csv"] = fetch_pitch_stats1(start, end)
+            # result["df_pitch2.csv"] = fetch_pitch_stats2(start, end)
+            # result["df_def.csv"]    = fetch_def_stats(start, end)
+            # result["df_run.csv"]    = fetch_run_stats(start, end)
+            # 임시(빈 반환) — 연결 전까지 안전 동작
+            for fname, cols in REQUIRED.items():
+                result[fname] = _empty(cols)
+        except Exception:
+            # 실패 시라도 구조는 유지
+            for fname, cols in REQUIRED.items():
+                result.setdefault(fname, _empty(cols))
+
+        # 스키마 정규화
+        for fname, cols in REQUIRED.items():
+            result[fname] = _normalize_columns(result[fname], cols)
+        return result
+
+
+# =========================
+# 스크립트 실행 테스트 (선택)
+# =========================
 if __name__ == "__main__":
-    print("Running pipeline to refresh cache...")
-    ensure_dirs()
-    _ = get_all_scores(force=True)
-    with open(cache_path("last_update.json"), "w", encoding="utf-8") as f:
-        json.dump({"ts": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())}, f, ensure_ascii=False)
-    print("Done.")
+    # 1) 부트
+    bootstrap_cache()
+    print("팀 옵션(샘플):", get_team_options())
+
+    # 2) 증분 갱신 테스트 (연결 전에는 빈 병합만 수행)
+    resp = refresh_cache_incremental(days_back=3, scraper=YourProjectScraper())
+    print("갱신 결과:", resp)
+
+    # 3) 개별 DF 접근
+    print("df_hit rows:", len(get_df_hit()))
