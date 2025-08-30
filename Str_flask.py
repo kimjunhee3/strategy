@@ -37,15 +37,28 @@ else:
     logging.warning("NanumGothic.ttf not found. looked at: %s", candidate_paths)
 
 # ---------- 애플리케이션 캐시 ----------
-DATA_CACHE = {"ts": 0, "payload": None}   # payload는 get_all_scores() 반환 12-튜플
+DATA_CACHE = {"ts": 0, "payload": None}   # payload는 12-튜플
 DATA_TTL   = 60*60*6  # 6시간
 
-# ---------- 파이프라인 의존 ----------
-from Str_cache import (
-    ensure_dirs, get_all_scores,
-    batting_features, pitching_features, defense_features, running_features,
-    metric_info, inverse_metrics as INV_METRICS
-)
+# ---------- 파이프라인 의존 (신규/구캐시 모두 호환) ----------
+# - 신규 Str_cache.py: bootstrap_cache, refresh_cache_incremental, YourProjectScraper, get_team_options, get_df_* ...
+# - 구 방식: ensure_dirs, get_all_scores ...
+NEW_CACHE = False
+try:
+    from Str_cache import (
+        bootstrap_cache, refresh_cache_incremental, YourProjectScraper,
+        get_team_options, get_df_hit, get_df_pitch1, get_df_pitch2, get_df_def, get_df_run,
+        batting_features, pitching_features, defense_features, running_features,
+        metric_info, inverse_metrics as INV_METRICS
+    )
+    NEW_CACHE = True
+except Exception:
+    # 구버전 API 사용 (get_all_scores/ensure_dirs 제공)
+    from Str_cache import (
+        ensure_dirs, get_all_scores,
+        batting_features, pitching_features, defense_features, running_features,
+        metric_info, inverse_metrics as INV_METRICS
+    )
 
 # ---------- 유틸 ----------
 def empty_stub_payload():
@@ -54,7 +67,7 @@ def empty_stub_payload():
     empty_raws   = [pd.DataFrame(columns=["팀"]) for _ in range(4)]  # df_hit,   df_pitch,   df_def,   df_run
     empty_cleans = [pd.DataFrame(columns=["팀"]) for _ in range(4)]  # clean_hit,clean_pitch,clean_def,clean_run
     return (*empty_scores, *empty_raws, *empty_cleans)
-    
+
 def read_payload_from_cache():
     """애플리케이션 메모리 캐시 사용(파일 캐시 X)."""
     if DATA_CACHE["payload"] is None:
@@ -72,6 +85,96 @@ def warmup_matplotlib():
     fig, ax = plt.subplots()
     ax.plot([0, 1], [0, 1])
     plt.close(fig)
+
+# ---------- (신규 캐시용) 원시→스코어 변환 ----------
+def _minmax(series: pd.Series):
+    s = pd.to_numeric(series, errors="coerce")
+    s_min, s_max = s.min(skipna=True), s.max(skipna=True)
+    if pd.isna(s_min) or pd.isna(s_max) or s_min == s_max:
+        return pd.Series([0.5] * len(s), index=s.index)  # 분산이 없으면 중립점
+    return (s - s_min) / (s_max - s_min)
+
+def _safe_float(df, col, row_idx):
+    try:
+        return float(df.iloc[row_idx][col])
+    except Exception:
+        return np.nan
+
+def _build_score_df(raw_df: pd.DataFrame, feature_map: dict, inv_metrics: set, team_col="팀"):
+    """
+    raw_df: 팀별 원시 지표 DF
+    feature_map: {영역라벨: [지표명1, 지표명2, ...]}
+    inv_metrics: 낮을수록 좋은 지표 셋
+    반환: ["팀"] + 영역라벨 컬럼을 가진 스코어 DF(0~1)
+    """
+    if raw_df is None or raw_df.empty or team_col not in raw_df.columns:
+        return pd.DataFrame(columns=[team_col] + list(feature_map.keys()))
+
+    df = raw_df.copy()
+    df[team_col] = df[team_col].astype(str).str.strip()
+
+    # 각 지표를 min-max 스케일링(역지표는 1 - scaled)
+    scaled = pd.DataFrame(index=df.index)
+    for area, metrics in feature_map.items():
+        for m in metrics:
+            if m not in df.columns:
+                continue
+            s = _minmax(df[m])
+            if m in inv_metrics:
+                s = 1 - s
+            scaled[m] = s
+
+    # 영역 점수 = 해당 영역 지표들의 평균(존재하는 것만)
+    out = pd.DataFrame({team_col: df[team_col]})
+    for area, metrics in feature_map.items():
+        cols = [m for m in metrics if m in scaled.columns]
+        if cols:
+            out[area] = scaled[cols].mean(axis=1, skipna=True)
+        else:
+            out[area] = np.nan
+
+    # 결측은 0.5(중립)로 보정
+    for c in out.columns:
+        if c == team_col: 
+            continue
+        out[c] = out[c].fillna(0.5)
+    return out
+
+def build_scores_from_cache():
+    """
+    신규 Str_cache(캐시 파일 기반)를 사용할 때,
+    캐시에 저장된 원시 DF들로부터 score_*와 clean_*을 구성해 12-튜플 반환.
+    """
+    # 원시 DF
+    df_hit   = get_df_hit()
+    # 주의: 프로젝트에 따라 투수 원시 DF가 1/2로 나뉘어 있을 수 있음
+    df_p1    = get_df_pitch1()  # 예: ERA/IP/WHIP
+    df_p2    = get_df_pitch2()  # 예: QS/SV/HLD
+    df_def   = get_df_def()
+    df_run   = get_df_run()
+
+    # 투수는 필요 시 병합(팀, 날짜 기준 중복/결측 무시한 outer join)
+    # 여기서는 팀 단위 비교가 목적이므로 팀 기준 병합(동명팀 단일레코드 가정)
+    if not df_p1.empty and not df_p2.empty and "팀" in df_p1.columns and "팀" in df_p2.columns:
+        df_pitch_raw = pd.merge(df_p1, df_p2, on="팀", how="outer")
+    else:
+        df_pitch_raw = df_p1 if not df_p1.empty else df_p2
+
+    # 스코어 DF (0~1)
+    score_hit   = _build_score_df(df_hit,   batting_features,  INV_METRICS)
+    score_pitch = _build_score_df(df_pitch_raw, pitching_features, INV_METRICS)
+    score_def   = _build_score_df(df_def,   defense_features,  INV_METRICS)
+    score_run   = _build_score_df(df_run,   running_features,  INV_METRICS)
+
+    # clean_* 은 원시 DF 그대로(필요 시 후처리)
+    clean_hit, clean_pitch, clean_def, clean_run = df_hit, df_pitch_raw, df_def, df_run
+
+    # 템플릿 호환 12-튜플
+    return (
+        score_hit, score_pitch, score_def, score_run,
+        df_hit, df_pitch_raw, df_def, df_run,
+        clean_hit, clean_pitch, clean_def, clean_run
+    )
 
 # ---------- 차트 ----------
 def draw_radar_chart(
@@ -93,10 +196,8 @@ def draw_radar_chart(
         plt.close()
         return f"output/{file_name}"
 
-    # 1) 축 라벨/각도
     labels = df_score.columns[1:]  # 첫 컬럼은 '팀'
     if team_name not in df_score["팀"].values or len(labels) == 0:
-        # 팀 미존재/라벨 없음 보호
         output_dir = os.path.join("static", "output")
         os.makedirs(output_dir, exist_ok=True)
         file_name = f"{team_name}_{category_name}_radar_{CHART_VER}.png"
@@ -110,7 +211,6 @@ def draw_radar_chart(
 
     angles = np.linspace(0, 2*np.pi, len(labels), endpoint=False).tolist()
 
-    # 2) 비교 데이터
     team_row = df_score[df_score["팀"] == team_name].iloc[0]
     score_col = str(df_score.columns[1])
     df_sorted = df_score.sort_values(by=score_col, ascending=False).reset_index(drop=True)
@@ -121,7 +221,6 @@ def draw_radar_chart(
 
     compare_df = pd.concat([team_row.to_frame().T, avg_row.to_frame().T], ignore_index=True)
 
-    # 3) 기본 설정
     fig, ax = plt.subplots(figsize=(11.0, 11.0), subplot_kw=dict(polar=True))
     r_max = 1.0
     ax.set_ylim(0, r_max)
@@ -130,13 +229,11 @@ def draw_radar_chart(
     ax.set_xticks(angles)
     ax.set_xticklabels([])
 
-    # 4) 스타일
     team_line_color = "#007bff"
     avg_line_color  = "#dc3545"
     team_fill_rgba = (0/255, 123/255, 255/255, 0.25)
     avg_fill_rgba  = (220/255, 53/255, 69/255, 0.12)
 
-    # 5) 폴리곤
     for idx, row in compare_df.iterrows():
         values = row[labels].values.tolist()
         values += values[:1]
@@ -147,7 +244,6 @@ def draw_radar_chart(
         ax.plot(plot_angles, values, linewidth=lw, marker=marker, linestyle=ls, color=line_color, zorder=3)
         ax.fill(plot_angles, values, color=fill_rgba, zorder=2)
 
-    # 6) 라벨 수동 배치
     label_radius = r_max * 1.15
     def _ha_for_angle(rad):
         deg = np.degrees(rad) % 360
@@ -164,7 +260,6 @@ def draw_radar_chart(
         else:
             ax.text(ang, label_radius, lab, ha=ha, va='center', fontsize=18)
 
-    # 7) 반지름 눈금
     if KFONT is not None:
         for t in ax.get_yticklabels():
             t.set_fontproperties(KFONT)
@@ -172,7 +267,6 @@ def draw_radar_chart(
     else:
         ax.tick_params(labelsize=13)
 
-    # 8) 범례
     if KFONT is not None:
         ax.legend(["해당팀", compare_team_name], loc='upper right', bbox_to_anchor=(1.20, 1.02), prop=KFONT, fontsize=15)
     else:
@@ -181,7 +275,6 @@ def draw_radar_chart(
     ax.grid(True, alpha=0.6, linestyle='--', linewidth=1)
     ax.set_facecolor('white')
 
-    # 9) 저장
     output_dir = os.path.join("static", "output")
     os.makedirs(output_dir, exist_ok=True)
     file_name = f"{team_name}_{category_name}_radar_{CHART_VER}.png"
@@ -211,7 +304,13 @@ def _fast_head_probe():
         return ("", 200)
 
 # 앱 시작 시 준비
-ensure_dirs()
+if NEW_CACHE:
+    # 신규 캐시 시스템 부팅
+    bootstrap_cache()
+else:
+    # 구 방식(디렉터리 준비)
+    ensure_dirs()
+
 try:
     warmup_matplotlib()
 except Exception as e:
@@ -220,10 +319,21 @@ except Exception as e:
 
 # ---------- 백그라운드 워밍업 ----------
 def _fetch_and_update_cache(force=False, attempts=3, base_sleep=2):
-    """네트워크 수집은 여기서만 수행."""
+    """
+    네트워크 수집은 여기서만 수행.
+    - 신규 캐시: refresh_cache_incremental(...) → 캐시에서 점수/클린 생성
+    - 구  캐시: get_all_scores(force)
+    """
     for attempt in range(attempts):
         try:
-            payload = get_all_scores(force=force)
+            if NEW_CACHE:
+                # 증분 갱신(실제 수집 로직은 YourProjectScraper.fetch_between 내부 연결)
+                refresh_cache_incremental(days_back=3, scraper=YourProjectScraper())
+                # 갱신 후 캐시에서 12-튜플 구성
+                payload = build_scores_from_cache()
+            else:
+                payload = get_all_scores(force=force)
+
             save_payload_to_cache(payload)
             return True
         except Exception as e:
@@ -234,8 +344,14 @@ def warm_up_async(force=False):
     threading.Thread(target=_fetch_and_update_cache, kwargs={"force": force}, daemon=True).start()
 
 # ---------- 렌더링 ----------
-def _team_list_from_disk_cache():
-    """디스크 캐시(static/cache/df_hit.csv)에서 팀 리스트만 추출(초기 기동 대비)."""
+def _team_list_from_cache_layer():
+    """팀 리스트: 신규는 get_team_options(), 구 방식은 디스크 폴백."""
+    if NEW_CACHE:
+        try:
+            return get_team_options()
+        except Exception:
+            pass
+    # 구 방식/폴백: 캐시 파일에서 추출
     try:
         p = os.path.join("static", "cache", "df_hit.csv")
         if os.path.exists(p):
@@ -275,7 +391,7 @@ def render_index(payload):
     if score_hit is None or (isinstance(score_hit, pd.DataFrame) and score_hit.empty):
         return render_template(
             "Bgraph.html",
-            team_list=_team_list_from_disk_cache(),
+            team_list=_team_list_from_cache_layer(),
             charts={}, analysis={}, warnings={},
             last_update=None
         )
